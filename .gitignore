@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+# Arbeitsdaten und Geheimnisse
+data/
+projects/
+client_secret*.json
+token.json
+config.local.yaml

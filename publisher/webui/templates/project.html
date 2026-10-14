@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% from "_status.html" import status_badge %}
+{% block title %}{{ p.meta.title or p.name }} – Publisher{% endblock %}
+{% block content %}
+<h1>{{ p.meta.title or p.name }} {% if p.meta.is_short %}<span class="badge b-eigen">Short</span>{% endif %}</h1>
+
+<section class="card" id="upload">
+  <h2>Upload &amp; Veröffentlichung</h2>
+  {% if blockers %}
+    <p><strong>Upload gesperrt.</strong> Diese Clips stammen von Creatorn ohne Status „erlaubt“:</p>
+    <ul class="blocklist">
+      {% for b in blockers %}<li><a href="#{{ b.clip_id }}">{{ b.clip_title }}</a> – {{ b.creator_name }}: „{{ b.status }}“{% if b.origin == 'export' %} (im exportierten Video){% endif %}</li>{% endfor %}
+    </ul>
+    <p class="muted">Clip auf „verworfen“ setzen und neu exportieren, oder die Freigabe in creators.yaml eintragen.</p>
+  {% endif %}
+  {% if not manifest %}<p class="muted">Noch kein Export vorhanden.</p>{% endif %}
+  {% if manifest and not manifest.video %}<p class="muted">Letzter Export ohne Video (nur Beschreibung) – zum Hochladen mit Rendern exportieren.</p>{% endif %}
+  {% if stale %}<p class="flash error">Die Clip-Auswahl wurde seit dem letzten Export geändert. Hochgeladen wird der letzte Export – bitte neu exportieren.</p>{% endif %}
+
+  <form method="post" action="{{ url_for('upload', name=p.name) }}" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <button {% if blockers or not manifest or not manifest.video %}disabled title="Upload gesperrt"{% endif %}>Privat hochladen</button>
+    {% if p.meta.publish_at %}<span class="muted">mit geplanter Veröffentlichung {{ p.meta.publish_at }}</span>{% endif %}
+  </form>
+
+  {% if upload %}
+    <dl style="margin-top:12px">
+      <dt>Video</dt><dd><a href="{{ upload.url }}">{{ upload.url }}</a></dd>
+      <dt>Sichtbarkeit</dt><dd>{{ upload.privacy }}{% if upload.publish_at %}, geplant für {{ upload.publish_at }}{% endif %}</dd>
+      <dt>Hochgeladen</dt><dd>{{ upload.uploaded_at }}</dd>
+      {% if upload.published_at %}<dt>Veröffentlicht</dt><dd>{{ upload.published_at }}</dd>{% endif %}
+    </dl>
+    {% if upload.privacy != 'public' %}
+    <div class="grid" style="margin-top:12px">
+      <form method="post" action="{{ url_for('publish', name=p.name) }}"
+            onsubmit="return confirm('Video jetzt öffentlich schalten?');">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label><input type="checkbox" name="confirm" value="ja" required> Ich habe Video, Credits und Freigaben geprüft.</label><br>
+        <button {% if blockers %}disabled{% endif %}>Jetzt veröffentlichen</button>
+      </form>
+      <form method="post" action="{{ url_for('schedule', name=p.name) }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <label>Veröffentlichen am <input type="datetime-local" name="when" required></label>
+        <button {% if blockers %}disabled{% endif %}>Planen</button>
+      </form>
+    </div>
+    {% endif %}
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Metadaten</h2>
+  <form method="post" action="{{ url_for('update_meta', name=p.name) }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="grid">
+      <label>Titel<br><input name="title" value="{{ p.meta.title }}" maxlength="100" style="width:100%"></label>
+      <label>Tags (Komma-getrennt)<br><input name="tags" value="{{ p.meta.tags|join(', ') }}" style="width:100%"></label>
+      <label>Kategorie-ID<br><input name="category_id" value="{{ p.meta.category_id }}" placeholder="20 = Gaming"></label>
+      <label>Thumbnail (Pfad)<br><input name="thumbnail" value="{{ p.meta.thumbnail }}" style="width:100%"></label>
+      <label>Geplante Veröffentlichung beim Upload<br><input type="datetime-local" name="publish_at" value="{{ p.meta.publish_at[:16] }}"></label>
+      <label><input type="checkbox" name="is_short" {% if p.meta.is_short %}checked{% endif %}> YouTube Short</label>
+    </div>
+    <label>Intro-Text<br><textarea name="intro_text" rows="3">{{ p.meta.intro_text }}</textarea></label>
+    <button>Speichern</button>
+  </form>
+  <form method="post" action="{{ url_for('regenerate_intro', name=p.name) }}" style="margin-top:8px">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <button>Intro mit LLM neu generieren</button>
+  </form>
+</section>
+
+<h2>Clips</h2>
+{% for c in clips %}
+{% set creator = reg.get(c.creator_id) %}
+<section class="card clip {{ c.status }} {% if c.id in blocked_ids %}blocked{% endif %}" id="{{ c.id }}">
+  <div class="row" style="justify-content:space-between">
+    <strong>{{ c.title }}</strong>
+    <span>
+      {% if c.is_own %}{{ status_badge('eigen') }}{% elif creator %}{{ status_badge(creator.permission_status) }}{% else %}{{ status_badge('nicht im Register') }}{% endif %}
+      <span class="badge">{{ c.status }}</span>
+    </span>
+  </div>
+  {% if c.id in blocked_ids %}<p class="flash error">Dieser Clip blockiert den Upload.</p>{% endif %}
+  <div class="grid" style="margin-top:8px">
+    <dl>
+      <dt>Creator</dt><dd>{{ c.source.creator_name }}</dd>
+      <dt>Livesendung</dt><dd>{{ c.live_start_dt|de_dt }} – {{ c.live_end_dt.strftime('%H:%M:%S') }}</dd>
+      <dt>Original-VOD</dt><dd>{% if c.source.vod_url %}<a href="{{ vod_link_at(c.source.vod_url, c.trim_start) }}">{{ c.trim_start|hms }}–{{ c.trim_end|hms }}</a>{% else %}{{ c.trim_start|hms }}–{{ c.trim_end|hms }}{% endif %}</dd>
+      {% if c.source.stream_title %}<dt>Stream</dt><dd>{{ c.source.stream_title }}</dd>{% endif %}
+      <dt>Im Highlight</dt><dd>{{ c.highlight_start|hms }}–{{ c.highlight_end|hms }}</dd>
+    </dl>
+    <dl>
+      <dt>Erkannt</dt><dd>VOD {{ c.source.vod_start|hms }}–{{ c.source.vod_end|hms }}</dd>
+      <dt>Live (erkannt)</dt><dd>{{ c.source.live_clip_start[:19].replace('T', ' ') }}</dd>
+      <dt>VOD-ID</dt><dd>{{ c.source.vod_id }}</dd>
+      <dt>Änderungen</dt><dd>{{ c.history|length }}</dd>
+    </dl>
+  </div>
+  <form method="post" action="{{ url_for('edit_clip', name=p.name, clip_id=c.id) }}" class="row" style="margin-top:8px">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <input name="title" value="{{ c.title }}" size="30">
+    <label>von <input name="trim_start" value="{{ c.trim_start|hms }}" size="8"></label>
+    <label>bis <input name="trim_end" value="{{ c.trim_end|hms }}" size="8"></label>
+    <label>Pos. <input name="order" type="number" value="{{ c.order }}" style="width:5em"></label>
+    <select name="status">{% for s in statuses %}<option {% if s == c.status %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+    <button>Speichern</button>
+  </form>
+</section>
+{% else %}
+<p class="muted">Noch keine Clips.</p>
+{% endfor %}
+
+<section class="card">
+  <h2>Clip hinzufügen</h2>
+  {% if p.vods %}
+  <form method="post" action="{{ url_for('add_clip', name=p.name) }}" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <select name="vod_id">{% for v in p.vods.values() %}<option value="{{ v.id }}">{{ v.creator_name }} – {{ v.live_start_dt|de_dt }}</option>{% endfor %}</select>
+    <input name="start" placeholder="1:02:03" required size="8">
+    <input name="end" placeholder="1:03:00" required size="8">
+    <input name="title" placeholder="Titel">
+    <button>Hinzufügen</button>
+  </form>
+  {% else %}<p class="muted">Erst ein VOD importieren: <code>publisher import {{ p.name }} VIDEO</code></p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Export</h2>
+  <form method="post" action="{{ url_for('export', name=p.name) }}" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <label><input type="checkbox" name="render" checked> Video rendern (ffmpeg)</label>
+    <button>Lokal exportieren</button>
+    <span class="muted">Export ist für alle VODs möglich, auch ohne Freigabe.</span>
+  </form>
+  {% if manifest %}
+    <p class="muted">Letzter Export: {{ manifest.created_at }} – {{ manifest.video or 'ohne Video' }}</p>
+    {% for w in manifest.warnings %}<p class="flash error">{{ w }}</p>{% endfor %}
+    <h3>Titel</h3><pre>{{ manifest.title }}</pre>
+    <h3>Beschreibung</h3><pre>{{ manifest.description }}</pre>
+    <h3>Tags</h3><pre>{{ manifest.tags|join(', ') }}</pre>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>VODs</h2>
+  <table>
+    <tr><th>VOD</th><th>Creator</th><th>Live-Start</th><th>Original</th></tr>
+    {% for v in p.vods.values() %}
+    <tr><td>{{ v.id }}<br><span class="muted">{{ v.path }}</span></td><td>{{ v.creator_name }}</td>
+        <td>{{ v.live_start_dt|de_dt }}</td>
+        <td>{% if v.vod_url %}<a href="{{ v.vod_url }}">{{ v.stream_title or v.vod_url }}</a>{% else %}{{ v.stream_title or '–' }}{% endif %}</td></tr>
+    {% endfor %}
+  </table>
+</section>
+
+{% if log %}
+<section class="card">
+  <h2>Upload-Log</h2>
+  <table>
+    {% for e in log|reverse %}<tr><td>{{ e.at }}</td><td>{{ e.event }}</td><td>{{ e.video_id }}</td><td>{{ e.publish_at or '' }}</td></tr>{% endfor %}
+  </table>
+</section>
+{% endif %}
+{% endblock %}

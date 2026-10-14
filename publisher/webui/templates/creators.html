@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% from "_status.html" import status_badge %}
+{% block content %}
+<h1>Creator-Register</h1>
+<p class="muted">Gepflegt in <code>{{ path }}</code>. Änderungen dort wirken sofort, auch auf bereits exportierte Videos.</p>
+<div class="card">
+<table>
+  <tr><th>Name</th><th>Status</th><th>Nachweis</th><th>Links</th><th>Credit-Vorgaben</th></tr>
+  {% for c in creators %}
+  <tr>
+    <td><strong>{{ c.name }}</strong><br><span class="muted">{{ c.id }}</span></td>
+    <td>{{ status_badge(c.permission_status) }}</td>
+    <td>{% if c.permission_proof.startswith('http') %}<a href="{{ c.permission_proof }}">{{ c.permission_proof }}</a>{% else %}{{ c.permission_proof or '–' }}{% endif %}</td>
+    <td>{% if c.twitch_channel_url %}<a href="{{ c.twitch_channel_url }}">Twitch</a> {% endif %}{% if c.youtube_channel_url %}<a href="{{ c.youtube_channel_url }}">YouTube</a>{% endif %}</td>
+    <td class="muted">
+      {% if c.credit.first_line %}Erster Satz: „{{ c.credit.first_line }}“<br>{% endif %}
+      Einblendung: „{{ c.overlay_text() }}“
+      {% if c.credit.extra_line %}<br>Zusatz: „{{ c.credit.extra_line }}“{% endif %}
+    </td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="muted">Keine Creator eingetragen.</td></tr>{% endfor %}
+</table>
+</div>
+{% endblock %}

@@ -1,0 +1,21 @@
+# Creator-Register: alle Creator, deren Material verarbeitet wird.
+# permission_status: "erlaubt" | "angefragt" | "nicht erlaubt"
+# Nur Clips von Creatorn mit "erlaubt" (oder eigene VODs) dürfen hochgeladen werden.
+creators:
+  - id: beispielstreamer
+    name: BeispielStreamer
+    youtube_channel_url: https://www.youtube.com/@BeispielStreamer
+    twitch_channel_url: https://www.twitch.tv/beispielstreamer
+    permission_status: erlaubt
+    permission_proof: "https://www.twitch.tv/beispielstreamer/about – Clip-Richtlinie: Highlights mit Credit erlaubt"
+    credit:                      # optional: eigene Credit-Vorgaben
+      first_line: "Alle Clips mit freundlicher Genehmigung von BeispielStreamer – twitch.tv/beispielstreamer"
+      # overlay_text: "Clip: BeispielStreamer (twitch.tv/beispielstreamer)"
+      # extra_line: "Folgt BeispielStreamer auch auf TikTok!"
+      # link: https://linktr.ee/beispielstreamer
+
+  - id: andere-creatorin
+    name: AndereCreatorin
+    twitch_channel_url: https://www.twitch.tv/anderecreatorin
+    permission_status: angefragt
+    permission_proof: "Mail vom 10.10.2026 – Antwort steht aus"

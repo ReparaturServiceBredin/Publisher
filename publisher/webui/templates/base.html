@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Publisher{% endblock %}</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --fg:#1d1d1f; --muted:#6b6b70; --line:#dedede;
+          --ok:#1f7a3a; --warn:#a15c00; --bad:#b3261e; --accent:#2b5cd6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141416; --card:#1e1e22; --fg:#ececf0; --muted:#9a9aa3; --line:#34343a;
+            --ok:#5cc47c; --warn:#e0a24a; --bad:#ff7a70; --accent:#7aa2ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:1200px; margin:0 auto; padding:16px; }
+  header { display:flex; gap:16px; align-items:baseline; border-bottom:1px solid var(--line); padding:12px 16px; }
+  header a { color:var(--fg); text-decoration:none; font-weight:600; }
+  a { color:var(--accent); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin:14px 0; }
+  .muted { color:var(--muted); }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600; border:1px solid currentColor; }
+  .b-erlaubt { color:var(--ok); } .b-angefragt { color:var(--warn); } .b-nicht { color:var(--bad); } .b-eigen { color:var(--muted); }
+  .flash { padding:8px 12px; border-radius:6px; margin:8px 0; white-space:pre-wrap; border:1px solid; }
+  .flash.ok { color:var(--ok); } .flash.error { color:var(--bad); }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; vertical-align:top; padding:6px 8px; border-bottom:1px solid var(--line); }
+  input, select, textarea, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:5px; padding:4px 6px; }
+  textarea { width:100%; }
+  button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); padding:6px 12px; }
+  button[disabled] { background:var(--line); border-color:var(--line); color:var(--muted); cursor:not-allowed; }
+  .clip { border-left:4px solid var(--line); }
+  .clip.blocked { border-left-color:var(--bad); }
+  .clip.verworfen { opacity:.6; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:10px 18px; }
+  dl { margin:0; display:grid; grid-template-columns:max-content 1fr; gap:2px 10px; font-size:14px; }
+  dt { color:var(--muted); }
+  dd { margin:0; overflow-wrap:anywhere; }
+  pre { white-space:pre-wrap; background:var(--bg); border:1px solid var(--line); padding:10px; border-radius:6px; font-size:13px; }
+  .blocklist li { color:var(--bad); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+</style>
+</head>
+<body>
+<header><a href="{{ url_for('index') }}">Publisher</a><a href="{{ url_for('creators') }}">Creator-Register</a></header>
+<main>
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for cat, msg in messages %}<div class="flash {{ cat }}">{{ msg }}</div>{% endfor %}
+{% endwith %}
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

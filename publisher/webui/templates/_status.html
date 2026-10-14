@@ -1,0 +1,6 @@
+{% macro status_badge(status) -%}
+{%- if status == 'erlaubt' %}<span class="badge b-erlaubt">erlaubt</span>
+{%- elif status == 'angefragt' %}<span class="badge b-angefragt">angefragt</span>
+{%- elif status == 'eigen' %}<span class="badge b-eigen">eigenes VOD</span>
+{%- else %}<span class="badge b-nicht">{{ status }}</span>{% endif -%}
+{%- endmacro %}

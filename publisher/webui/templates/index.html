@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Projekte</h1>
+<div class="card">
+  <table>
+    <tr><th>Projekt</th><th>Clips</th><th>Upload</th></tr>
+    {% for p, blockers in projects %}
+    <tr>
+      <td><a href="{{ url_for('project', name=p.name) }}">{{ p.meta.title or p.name }}</a> <span class="muted">{{ p.name }}</span></td>
+      <td>{{ p.selected_clips()|length }} ausgewählt / {{ p.candidates|length }}</td>
+      <td>{% if blockers %}<span class="badge b-nicht">gesperrt ({{ blockers|length }})</span>
+          {% elif p.last_upload %}<a href="{{ p.last_upload.url }}">{{ p.last_upload.privacy }}</a>
+          {% else %}<span class="muted">bereit</span>{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="muted">Noch keine Projekte – VOD importieren mit <code>publisher import PROJEKT VIDEO</code>.</td></tr>
+    {% endfor %}
+  </table>
+  <form method="post" action="{{ url_for('create_project') }}" class="row" style="margin-top:10px">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <input name="name" placeholder="neues-projekt" required pattern="[A-Za-z0-9][A-Za-z0-9_.\-]*">
+    <button>Projekt anlegen</button>
+  </form>
+</div>
+<h2>Upload-Log</h2>
+<div class="card">
+  <table>
+    <tr><th>Zeit</th><th>Ereignis</th><th>Projekt</th><th>Video</th><th>Quellen</th></tr>
+    {% for e in log|reverse %}
+    <tr><td>{{ e.at }}</td><td>{{ e.event }}</td><td>{{ e.project }}</td>
+        <td>{% if e.url %}<a href="{{ e.url }}">{{ e.video_id }}</a>{% else %}{{ e.video_id }}{% endif %}</td>
+        <td>{{ (e.creators or [])|join(', ') }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">Noch keine Uploads.</td></tr>{% endfor %}
+  </table>
+</div>
+{% endblock %}

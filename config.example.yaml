@@ -1,0 +1,31 @@
+# Kopieren nach config.yaml und anpassen. Alle Werte sind optional.
+data_dir: data
+creators_file: creators.yaml
+timezone: Europe/Berlin
+
+own_channel:
+  name: Mein Kanal
+  youtube_channel_url: https://www.youtube.com/@meinkanal
+  twitch_channel_url: https://www.twitch.tv/meinkanal
+
+llm:
+  enabled: true
+  model: claude-opus-5-5
+  effort: low
+  style_reference_dir: style_references   # *.txt/*.md mit Beschreibungen der Referenz-Creator
+
+youtube:
+  client_secret_file: client_secret.json  # OAuth-Client "Desktop-App" aus der Google Cloud Console
+  token_file: data/token.json
+  default_category_id: "20"               # Gaming
+  default_tags: []
+  default_language: de
+
+overlay:
+  duration: 3.0              # Sekunden, Einblendung "Clip von … – twitch.tv/…"
+  fontsize: 42
+  font: Sans
+  short_full_duration: true  # bei Shorts den Credit durchgehend zeigen
+
+video: {width: 1920, height: 1080, fps: 30}
+short_video: {width: 1080, height: 1920, fps: 30}

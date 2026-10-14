@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "publisher"
+version = "0.1.0"
+description = "Highlight-Videos aus eigenen und fremden VODs mit Quellenangaben, Credits und YouTube-Upload"
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6",
+    "Flask>=3",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=1.0"]
+youtube = ["google-api-python-client>=2", "google-auth-oauthlib>=1"]
+all = ["anthropic>=1.0", "google-api-python-client>=2", "google-auth-oauthlib>=1"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+publisher = "publisher.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["publisher*"]
+
+[tool.setuptools.package-data]
+publisher = ["webui/templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
