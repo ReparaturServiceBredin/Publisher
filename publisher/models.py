@@ -120,6 +120,11 @@ class Candidate:
     highlight_start: float | None = None
     highlight_end: float | None = None
     history: list[dict] = field(default_factory=list)
+    # Mehrere POVs: weitere Streamer, die im Splitscreen gleichzeitig zu sehen sind.
+    # Jeder Eintrag: vod_id, creator_id, creator_name, vod_url, live_start, offset
+    # (Zeit im Companion-VOD = trim_start + offset). Wird wie die Quelle nie verändert.
+    companions: list[dict] = field(default_factory=list)
+    moment: int | None = None  # gleiche Nummer = gleiche Situation aus verschiedenen POVs
 
     EDITABLE_FIELDS = ("title", "trim_start", "trim_end", "status", "order")
 
@@ -165,6 +170,11 @@ class Candidate:
             "highlight_start": self.highlight_start,
             "highlight_end": self.highlight_end,
             "original_detection": asdict(self.source),
+            "companions": [
+                {**c, "vod_start": self.trim_start + c["offset"], "vod_end": self.trim_end + c["offset"]}
+                for c in self.companions
+            ],
+            "moment": self.moment,
         }
 
     def to_dict(self) -> dict:

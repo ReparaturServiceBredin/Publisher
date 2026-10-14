@@ -49,9 +49,21 @@ def selftest(out_file: str) -> int:
         from yt_dlp.extractor import gen_extractor_classes
 
         names = {e.IE_NAME for e in gen_extractor_classes()}
+
+        # neue Oberfläche + Upload-Module müssen in der .exe stecken
+        import customtkinter
+
+        customtkinter.set_default_color_theme("blue")  # lädt die mitgelieferten Theme-Dateien
+        import googleapiclient.discovery  # noqa: F401
+        from PIL import Image  # noqa: F401
+
+        import publisher.gui  # noqa: F401
+        from publisher import tiktok, videobox, youtube  # noqa: F401
+
+        assert tiktok.chunk_plan(50 * 1024 * 1024)[1] == 5
         assert "twitch:vod" in names and "youtube" in names, "yt-dlp Extraktoren fehlen"
         msg = f"OK clips={len(result.clips)} video={result.video.stat().st_size} yt-dlp={yt_dlp.version.__version__}"
-        ok = len(result.clips) == 2
+        ok = len(result.clips) == 2 and len(result.vertical) == 2
     except Exception:
         msg, ok = "FEHLER\n" + traceback.format_exc(), False
     Path(out_file).write_text(msg, encoding="utf-8")

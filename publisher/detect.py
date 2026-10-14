@@ -1,10 +1,15 @@
-"""Automatische Highlight-Erkennung über die Tonspur.
+"""Automatische Highlight-Erkennung über die Tonspur – mit Fokus auf Lachen.
 
-Idee: In Streams sind Highlights fast immer *lauter als üblich* – Schreien, Lachen,
-Jubel, Explosionen. Wir messen die Lautstärke pro Sekunde, vergleichen sie mit dem
-gleitenden Normalpegel der letzten Minuten (so stören leise oder laute Streamphasen
-nicht) und nehmen die stärksten Ausreißer. Jeder Treffer bekommt Vorlauf (was führte
-zur Reaktion?) und Nachlauf und wird verlängert, solange es laut bleibt.
+Pro Sekunde werden zwei Dinge gemessen:
+
+* **Aufregung**: Wie viel lauter als der normale Pegel der letzten Minuten ist es?
+* **Lachen**: Lachen ist rhythmisch – „ha-ha-ha“ pulsiert mit 3,5–7,5 Silben pro Sekunde
+  im Sprachfrequenzbereich (300–3000 Hz). Wir messen, wie stark die Lautstärke-Hüllkurve
+  genau in diesem Takt schwingt. Gleichmäßiges Schreien, Musik oder Explosionen
+  schwingen anders und bekommen deshalb weniger Punkte.
+
+Beides zusammen ergibt die Highlight-Kurve. Schnittpunkte werden anschließend auf die
+nächste leise Stelle geschoben, damit kein Wort mittendrin abgeschnitten wird.
 """
 
 from __future__ import annotations
@@ -19,7 +24,12 @@ import numpy as np
 from .ffmpeg_bin import ffmpeg_exe, popen_kwargs
 
 SAMPLE_RATE = 8000
+FRAME = 160  # 20 ms → Hüllkurve mit 50 Hz
+FRAMES_PER_SEC = SAMPLE_RATE // FRAME
 Progress = Callable[[str, float], None] | None
+
+FOCUS_LAUGH = "lachen"
+FOCUS_LOUD = "laut"
 
 
 @dataclass
@@ -34,34 +44,101 @@ class Highlight:
         return self.end - self.start
 
 
-def loudness_per_second(path: str | Path, duration: float | None = None, progress: Progress = None) -> np.ndarray:
-    """Lautstärke in dB pro Sekunde (dekodiert die Tonspur einmal, streamend)."""
+@dataclass
+class AudioAnalysis:
+    loudness: np.ndarray  # dB pro Sekunde (Gesamtsignal)
+    laugh: np.ndarray  # 0..1 pro Sekunde: Anteil der Hüllkurven-Schwingung im Lach-Takt
+    envelope: np.ndarray  # Sprachband-Hüllkurve mit 10 Hz (für die Synchronisierung mehrerer VODs)
+
+    @property
+    def duration(self) -> int:
+        return len(self.loudness)
+
+
+# ---------------------------------------------------------------- Messung
+
+def _decode(path: str | Path):
     cmd = [
         ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-i", str(path),
         "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **popen_kwargs())
-    values: list[float] = []
-    chunk_bytes = SAMPLE_RATE * 2 * 60  # eine Minute pro Lesevorgang
-    rest = b""
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **popen_kwargs())
+
+
+_freqs = np.fft.rfftfreq(FRAME, 1 / SAMPLE_RATE)
+_SPEECH = (_freqs >= 300) & (_freqs <= 3000)
+_WINDOW = np.hanning(FRAME).astype(np.float32)
+
+
+def analyze_audio(path: str | Path, duration: float | None = None, progress: Progress = None) -> AudioAnalysis:
+    """Dekodiert die Tonspur einmal (streamend) und misst Lautstärke, Lach-Rhythmus und Hüllkurve."""
+    proc = _decode(path)
     assert proc.stdout is not None
+    loud: list[np.ndarray] = []
+    band_env: list[np.ndarray] = []
+    chunk = SAMPLE_RATE * 2 * 60  # eine Minute pro Lesevorgang
+    rest = b""
+    seconds = 0
     while True:
-        data = proc.stdout.read(chunk_bytes)
+        data = proc.stdout.read(chunk)
         if not data:
             break
         data = rest + data
         usable = len(data) - len(data) % (SAMPLE_RATE * 2)
         rest = data[usable:]
-        samples = np.frombuffer(data[:usable], dtype=np.int16).astype(np.float32).reshape(-1, SAMPLE_RATE)
-        rms = np.sqrt(np.mean(samples * samples, axis=1)) / 32768.0
-        values.extend((20 * np.log10(rms + 1e-6)).tolist())
+        if not usable:
+            continue
+        x = np.frombuffer(data[:usable], dtype=np.int16).astype(np.float32) / 32768.0
+        sec = x.reshape(-1, SAMPLE_RATE)
+        loud.append(20 * np.log10(np.sqrt(np.mean(sec * sec, axis=1)) + 1e-6))
+        frames = x.reshape(-1, FRAME) * _WINDOW
+        spec = np.abs(np.fft.rfft(frames, axis=1)) ** 2
+        band_env.append(np.sqrt(spec[:, _SPEECH].sum(axis=1) + 1e-12).astype(np.float32))
+        seconds += sec.shape[0]
         if progress and duration:
-            progress("Analysiere Ton", min(len(values) / duration, 1.0))
+            progress("Analysiere Ton", min(seconds / duration, 1.0))
     err = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
-    if proc.wait() != 0 and not values:
+    if proc.wait() != 0 and not loud:
         raise RuntimeError(f"Tonspur konnte nicht gelesen werden: {err.strip()[-300:]}")
-    return np.array(values, dtype=np.float32)
+    if not loud:
+        return AudioAnalysis(np.zeros(0, np.float32), np.zeros(0, np.float32), np.zeros(0, np.float32))
+    loudness = np.concatenate(loud).astype(np.float32)
+    env = np.concatenate(band_env)
+    return AudioAnalysis(loudness, laugh_rhythm(env), _envelope_10hz(env))
 
+
+def laugh_rhythm(env50: np.ndarray) -> np.ndarray:
+    """Anteil der Hüllkurven-Energie bei 3,5–7,5 Hz (Lach-Takt) je Sekunde, 2-Sekunden-Fenster."""
+    n_sec = len(env50) // FRAMES_PER_SEC
+    if n_sec == 0:
+        return np.zeros(0, np.float32)
+    log_env = np.log(env50[: n_sec * FRAMES_PER_SEC] + 1e-6)
+    win = 2 * FRAMES_PER_SEC
+    padded = np.pad(log_env, (FRAMES_PER_SEC // 2, win), mode="edge")
+    idx = np.arange(n_sec)[:, None] * FRAMES_PER_SEC + np.arange(win)[None, :]
+    w = padded[idx]
+    w = w - w.mean(axis=1, keepdims=True)
+    power = np.abs(np.fft.rfft(w * np.hanning(win), axis=1)) ** 2
+    f = np.fft.rfftfreq(win, 1 / FRAMES_PER_SEC)
+    laugh_band = (f >= 3.5) & (f <= 7.5)
+    all_band = (f >= 1.0) & (f <= 12.0)
+    ratio = power[:, laugh_band].sum(axis=1) / (power[:, all_band].sum(axis=1) + 1e-9)
+    # gleichmäßiges Rauschen hat auch etwas Energie im Lach-Band – erst die starke Pulsation zählt
+    depth = np.clip(w.std(axis=1) / 0.8, 0, 1)
+    return (ratio * depth).astype(np.float32)
+
+
+def _envelope_10hz(env50: np.ndarray) -> np.ndarray:
+    n = len(env50) // 5
+    e = env50[: n * 5].reshape(n, 5).mean(axis=1)
+    return (20 * np.log10(e + 1e-6)).astype(np.float32)
+
+
+def loudness_per_second(path: str | Path, duration: float | None = None, progress: Progress = None) -> np.ndarray:
+    return analyze_audio(path, duration, progress).loudness
+
+
+# ---------------------------------------------------------------- Kurven
 
 def _moving_average(x: np.ndarray, window: int) -> np.ndarray:
     if window <= 1 or len(x) == 0:
@@ -85,17 +162,56 @@ def _rolling_baseline(x: np.ndarray, window: int = 300, block: int = 30) -> np.n
     return np.interp(np.arange(n), centers, smoothed).astype(np.float32)
 
 
+def _robust_z(x: np.ndarray) -> np.ndarray:
+    resid = x - _rolling_baseline(x)
+    mad = np.median(np.abs(resid - np.median(resid))) * 1.4826
+    return resid / max(float(mad), 1e-3)
+
+
 def excitement_curve(loudness: np.ndarray) -> np.ndarray:
     """Wie viel lauter als normal ist es gerade? (robuster z-Wert, leicht geglättet)"""
     if len(loudness) == 0:
         return loudness
-    # Stille (Pausen, "Gleich geht's los"-Bildschirm) nicht als Normalpegel zählen
-    floor = np.percentile(loudness, 5)
+    floor = np.percentile(loudness, 5)  # Stille zählt nicht als Normalpegel
     x = np.maximum(loudness, floor)
     resid = x - _rolling_baseline(x)
     mad = np.median(np.abs(resid - np.median(resid))) * 1.4826
     spread = max(float(mad), 1.0)  # mindestens 1 dB, sonst explodieren z-Werte bei Monoton-Ton
     return _moving_average(resid / spread, 3)
+
+
+def highlight_curve(analysis: AudioAnalysis, focus: str = FOCUS_LAUGH) -> np.ndarray:
+    """Kombinierte Kurve. Fokus „lachen“: Lach-Rhythmus zählt stark, reine Lautstärke weniger."""
+    excite = excitement_curve(analysis.loudness)
+    if focus != FOCUS_LAUGH or len(analysis.laugh) == 0:
+        return excite
+    n = min(len(excite), len(analysis.laugh))
+    excite, laugh = excite[:n], analysis.laugh[:n]
+    laugh_z = np.clip(_robust_z(_moving_average(laugh, 3)), 0, None)
+    # Lachen zählt nur, wenn es auch hörbar ist (nicht leises Hintergrundgeräusch)
+    audible = np.clip(excite + 1.0, 0, 3) / 3
+    return (0.6 * excite + 1.4 * laugh_z * audible).astype(np.float32)
+
+
+# ---------------------------------------------------------------- Auswahl
+
+def snap_to_quiet(start: float, end: float, loudness: np.ndarray, reach: float = 3.0) -> tuple[float, float]:
+    """Schnitt-Start/-Ende auf die leiseste Sekunde in der Nähe legen (Sprechpausen)."""
+    n = len(loudness)
+    if n == 0:
+        return start, end
+
+    def quietest(lo: float, hi: float, fallback: float) -> float:
+        a, b = max(0, int(lo)), min(n, int(np.ceil(hi)))
+        if b - a < 1:
+            return fallback
+        return float(a + int(np.argmin(loudness[a:b])))
+
+    new_start = quietest(start - reach, start + 1.0, start)
+    new_end = quietest(end - 1.0, end + reach, end - 1) + 1.0
+    if new_end - new_start < (end - start) * 0.6:
+        return start, end
+    return max(0.0, new_start), min(float(n), new_end)
 
 
 def pick_highlights(
@@ -109,6 +225,7 @@ def pick_highlights(
     extend_threshold: float = 1.0,
     skip_start: float = 30.0,
     max_clips: int | None = None,
+    loudness: np.ndarray | None = None,
 ) -> list[Highlight]:
     """Wählt die stärksten Momente, bis `target_seconds` erreicht ist. Chronologisch sortiert."""
     n = len(curve)
@@ -128,21 +245,29 @@ def pick_highlights(
             break
         if idx < skip or taken[idx]:
             continue
-        # verlängern, solange die Aufregung anhält (begrenzt)
-        peak_end = idx
+        peak_end = idx  # verlängern, solange die Aufregung anhält (begrenzt)
         while peak_end + 1 < n and curve[peak_end + 1] >= extend_threshold and peak_end - idx < max_clip / 2:
             peak_end += 1
         start = max(0.0, idx - pre_roll)
         end = min(float(n), peak_end + 1 + post_roll)
         end = min(end, start + max_clip)
+        if loudness is not None:
+            start, end = snap_to_quiet(start, end, loudness)
         s_i, e_i = int(start), int(np.ceil(end))
         if taken[s_i:e_i].any():
-            # überlappt mit einem stärkeren Highlight – zusammenlegen statt doppelt nehmen
-            continue
+            continue  # überlappt mit einem stärkeren Highlight
         taken[s_i:e_i] = True
         picks.append(Highlight(start, end, float(idx), score))
         total += end - start
     return sorted(picks, key=lambda h: h.start)
+
+
+def pick_with_fallback(curve: np.ndarray, target_seconds: float, **kwargs) -> list[Highlight]:
+    picks = pick_highlights(curve, target_seconds, **kwargs)
+    if not picks and len(curve):
+        # sehr gleichförmiger Stream: Schwelle senken, damit trotzdem etwas entsteht
+        picks = pick_highlights(curve, target_seconds, **{**kwargs, "min_score": 0.5})
+    return picks
 
 
 def detect_highlights(
@@ -150,16 +275,12 @@ def detect_highlights(
     target_seconds: float,
     duration: float | None = None,
     progress: Progress = None,
+    focus: str = FOCUS_LAUGH,
     **kwargs,
 ) -> list[Highlight]:
-    loud = loudness_per_second(audio_or_video, duration, progress)
-    curve = excitement_curve(loud)
-    picks = pick_highlights(curve, target_seconds, **kwargs)
-    if not picks and len(curve):
-        # sehr gleichförmiger Stream: Schwelle senken, damit trotzdem etwas entsteht
-        kwargs = {**kwargs, "min_score": 0.5}
-        picks = pick_highlights(curve, target_seconds, **kwargs)
-    return picks
+    analysis = analyze_audio(audio_or_video, duration, progress)
+    curve = highlight_curve(analysis, focus)
+    return pick_with_fallback(curve, target_seconds, loudness=analysis.loudness, **kwargs)
 
 
 def target_length(vod_seconds: float, wanted_minutes: float = 12) -> float:

@@ -8,21 +8,55 @@
    und nicht in „Programme“, sonst darf sie sich nicht selbst aktualisieren).
 3. **Starten:** Doppelklick. Beim ersten Mal warnt Windows evtl. („Der Computer wurde durch Windows
    geschützt“): *Weitere Informationen → Trotzdem ausführen*.
-4. **Benutzen:** VOD-Link (Twitch/YouTube) einfügen oder eine Datei wählen → **Highlights erstellen**.
-
-Ergebnis in `C:\Users\<Name>\Publisher\Fertig\…`:
-- `<Titel>.mp4`: Highlight-Video (Länge wählbar, Standard 12 Minuten)
-- `Einzelclips\01 Highlight 1.mp4`, …: jeder Moment einzeln
-- `Beschreibung.txt`: Titel, Kapitelmarken und Credits zum Kopieren
+4. **Benutzen:** Unter **Erstellen** einen oder mehrere VOD-Links (Twitch/YouTube) oder Dateien eintragen,
+   dann auf **Highlights erstellen** klicken.
 
 **Updates:** Jeder neue Stand in diesem Repo baut automatisch eine neue `Publisher.exe` (GitHub Actions →
-Release). Die exe prüft beim Start, ob es eine neuere Version gibt, lädt sie und startet sich neu.
+Release). Die exe prüft beim Start, ob es eine neuere Version gibt, lädt sie herunter und startet sich neu.
 Kein Passwort und kein Login nötig.
 
-**Wie werden Highlights gefunden?** Über die Tonspur: Momente, die deutlich lauter sind als der normale
-Pegel des Streams (Schreien, Lachen, Jubel, Action). Jeder Treffer bekommt etwa 20 s Vorlauf und 8 s
-Nachlauf. Bei Links wird zuerst nur die Tonspur geladen, danach nur die Highlight-Abschnitte als Video.
-Das ganze VOD muss also nicht heruntergeladen werden.
+### Die vier Bereiche der App
+
+| Bereich | Wofür |
+|---|---|
+| **Erstellen** | Quellen eintragen, Länge (5–15 Min), Fokus („Lachen“ oder „Alles Laute“), Layout bei mehreren VODs, Übergänge, Hochformat-Clips |
+| **Videobox** | Alle fertigen Videos mit Vorschaubild; abspielen, Ordner öffnen, **direkt zu YouTube oder TikTok hochladen** |
+| **Verbindungen** | YouTube- und TikTok-Konto einmalig verbinden |
+| **Freigaben** | Pro Creator „erlaubt / angefragt / nicht erlaubt“ – nur freigegebene Clips (oder eigene VODs) lassen sich hochladen |
+
+Ergebnis in `C:\Users\<Name>\Publisher\Fertig\<Datum Titel>\`:
+- `<Titel>.mp4`: Highlight-Video mit weichen Überblendungen
+- `Einzelclips\…`: jeder Moment einzeln (16:9)
+- `Hochformat\…`: dieselben Clips in 9:16 mit unscharfem Hintergrund für TikTok/Shorts
+- `Beschreibung.txt`: Titel, Kapitelmarken und Credits
+
+### Wie die Highlights gefunden werden
+- **Lachen zuerst:** Lachen pulsiert rhythmisch („ha-ha-ha“, 3,5–7,5 Silben pro Sekunde im Sprachbereich).
+  Genau dieser Takt wird gemessen. Gleichmäßiges Schreien, Musik oder Explosionen zählen weniger.
+  Mit „Alles Laute“ zählt wieder jede laute Stelle.
+- **Saubere Schnitte:** Start und Ende jedes Clips werden auf die nächste Sprechpause geschoben. Zwischen den
+  Clips gibt es eine 0,5-Sekunden-Überblendung (Bild und Ton), am Anfang und Ende wird ein- bzw. ausgeblendet.
+- **Mehrere VODs (gemeinsamer Stream):** Die VODs werden über die Startzeit und den Ton synchronisiert (Streamer im
+  selben Call hören sich gegenseitig). Momente, in denen mehrere gleichzeitig reagieren, zählen mehr.
+  - *POV-Wechsel:* erst die Situation aus dem stärksten POV, danach die Reaktionen der anderen
+  - *Splitscreen:* 2 Streamer nebeneinander, 3–4 im Raster, jeweils mit Namen
+- Bei Links wird zuerst nur die Tonspur geladen, danach nur die Highlight-Abschnitte als Video.
+
+### YouTube verbinden (einmalig)
+1. In der [Google Cloud Console](https://console.cloud.google.com/) ein Projekt anlegen, *YouTube Data API v3*
+   aktivieren, OAuth-Zustimmungsbildschirm einrichten (dich selbst als Testnutzer eintragen) und einen
+   OAuth-Client vom Typ **Desktop-App** erstellen. Die JSON-Datei herunterladen.
+2. In der App unter **Verbindungen → YouTube → Verbinden** die JSON-Datei wählen und im Browser anmelden.
+3. Wichtig: Solange Google das API-Projekt nicht geprüft hat, setzt YouTube per API hochgeladene Videos
+   automatisch auf **privat**. Das kannst du danach in YouTube Studio ändern. Das Tageskontingent reicht für etwa 6 Uploads.
+
+### TikTok verbinden (einmalig)
+1. Auf [developers.tiktok.com](https://developers.tiktok.com/) eine App anlegen, **Login Kit** und
+   **Content Posting API** (Direct Post) hinzufügen, Scopes `user.info.basic` und `video.publish`.
+2. Bei Login Kit → Desktop die Redirect-URI `http://127.0.0.1:3455/callback/` eintragen
+   (Button „Redirect-URI kopieren“ in der App).
+3. Client Key und Client Secret in der App eintragen → **Verbinden** → im Browser bestätigen.
+4. Wichtig: Bis TikTok die App geprüft hat, erlaubt TikTok nur private Posts („Nur ich“).
 
 ---
 

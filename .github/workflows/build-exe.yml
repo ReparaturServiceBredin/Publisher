@@ -43,16 +43,21 @@ jobs:
           printf '"""Wird beim Bauen der .exe automatisch überschrieben."""\n\n__version__ = "%s"\n' "$VERSION" > publisher/_version.py
 
       - name: Abhängigkeiten
-        run: pip install ".[exe]"
+        run: pip install ".[exe,youtube]"
 
       - name: EXE bauen
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed --name Publisher
           --collect-data imageio_ffmpeg
           --collect-data tzdata
+          --collect-data customtkinter
           --collect-submodules yt_dlp
           --hidden-import publisher.gui
-          --exclude-module flask --exclude-module anthropic
+          --hidden-import publisher.tiktok
+          --hidden-import publisher.videobox
+          --hidden-import publisher.youtube
+          --hidden-import googleapiclient.discovery
+          --exclude-module anthropic
           publisher_app.py
 
       - name: Selbsttest der fertigen EXE

@@ -13,7 +13,9 @@ dependencies = [
     "numpy>=1.26",
     "yt-dlp>=2025.1.1",
     "imageio-ffmpeg>=0.5",
-    "tzdata; sys_platform == 'win32'",  # Windows hat keine eigene Zeitzonen-Datenbank
+    "tzdata; sys_platform == 'win32'",
+    "customtkinter>=5.2",
+    "Pillow>=10",  # Windows hat keine eigene Zeitzonen-Datenbank
 ]
 
 [project.optional-dependencies]

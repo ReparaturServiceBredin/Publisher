@@ -40,6 +40,8 @@ DEFAULTS: dict = {
         "short_full_duration": True,
     },
     "video": {"width": 1920, "height": 1080, "fps": 30},
+    # weiche Überblendung zwischen den Clips + Ein-/Ausblenden am Anfang/Ende
+    "transitions": {"enabled": True, "duration": 0.5},
     "short_video": {"width": 1080, "height": 1920, "fps": 30},
 }
 

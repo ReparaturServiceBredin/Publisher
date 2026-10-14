@@ -133,3 +133,59 @@ def test_make_highlights_from_link_uses_sections(tmp_path, settings, registry, m
 
     reg = CreatorRegistry.load(settings.creators_file)
     assert reg.get("neuer-streamer").permission_status == "angefragt"
+
+
+def _pov(tmp_path, name, color, skip, laugh_at, dur=240):
+    """Ein POV eines gemeinsamen Calls: gemeinsames Grundgeräusch, beginnt `skip` s später, Lachen bei `laugh_at` (Call-Zeit)."""
+    import subprocess
+
+    out = tmp_path / f"{name}.mp4"
+    laugh = "+".join(f"between(t+{skip},{a},{a + 5})" for a in laugh_at)
+    subprocess.run(
+        [ffmpeg_exe(), "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", f"color=c={color}:s=320x180:r=25:d={dur}",
+         "-f", "lavfi", "-i", f"anoisesrc=d={dur + skip}:c=pink:a=0.05:seed=7,atrim=start={skip},asetpts=PTS-STARTPTS,"
+                              f"volume='0.6+0.4*sin(0.7*(t+{skip}))*sin(0.13*(t+{skip}))':eval=frame",
+         "-f", "lavfi", "-i", f"anoisesrc=d={dur}:c=white:a=0.6:seed=3,bandpass=f=1000:width_type=h:w=1500,"
+                              f"volume='({laugh})*(0.5+0.5*sin(2*PI*5*t))':eval=frame",
+         "-filter_complex", "[1][2]amix=inputs=2:normalize=0[a]",
+         "-map", "0:v", "-map", "[a]", "-t", str(dur), "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(out)],
+        check=True,
+    )
+    return out
+
+
+@pytest.mark.parametrize("layout", ["pov", "split"])
+def test_multi_vod_pov_and_split(tmp_path, settings, layout):
+    from publisher.auto import Options
+    from publisher.models import Project
+
+    a = _pov(tmp_path, "anna", "red", 0, [100, 180])
+    b = _pov(tmp_path, "ben", "blue", 30, [100, 180])  # Ben startet 30 s später, lacht zur selben Zeit
+    steps = []
+    result = make_highlights([str(a), str(b)], settings, options=Options(minutes=2, layout=layout),
+                             progress=lambda m, f: steps.append(m), output_root=tmp_path / "Fertig")
+    assert any("Versatz -30.0 s (über den Ton" in w for w in result.warnings), result.warnings
+    project = Project.load(settings.projects_dir / result.project / "project.json")
+    clips = project.selected_clips()
+    if layout == "pov":
+        # pro Moment: Situation + Reaktion aus dem anderen POV, gleiche Moment-Nummer
+        moments = {c.moment for c in clips}
+        assert len(clips) >= 2 * len(moments) >= 4
+        assert {c.source.vod_id for c in clips} == set(project.vods)
+        assert any("Reaktion" in c.title for c in clips)
+    else:
+        assert all(len(c.companions) == 1 for c in clips)
+        assert all(abs(c.companions[0]["offset"] - (-30.0 if c.source.vod_id == list(project.vods)[0] else 30.0)) < 0.5
+                   for c in clips)
+    assert len(result.vertical) == len(result.clips)
+    assert render_probe_vertical(result.vertical[0])
+    info = (result.folder / "info.json").read_text(encoding="utf-8")
+    assert '"Hochformat/' in info
+
+
+def render_probe_vertical(path):
+    from publisher import render
+
+    i = render.probe(path)
+    return i["height"] > i["width"]

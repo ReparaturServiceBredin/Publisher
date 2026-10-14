@@ -55,18 +55,22 @@ def find_blockers(project: Project, registry: CreatorRegistry) -> list[Blocker]:
     entries: list[tuple[str, str, str, str, str]] = []
     for c in project.selected_clips():
         entries.append((c.id, c.title, c.source.creator_id, c.source.creator_name, "auswahl"))
+        for comp in c.companions:  # Splitscreen: jeder sichtbare Streamer braucht eine Freigabe
+            entries.append((c.id, c.title, comp["creator_id"], comp["creator_name"], "auswahl"))
     for c in _exported_clips(project):
         entries.append((c["clip_id"], c["title"], c["creator_id"], c["creator_name"], "export"))
+        for comp in c.get("companions", []):
+            entries.append((c["clip_id"], c["title"], comp["creator_id"], comp["creator_name"], "export"))
 
     blockers: list[Blocker] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for clip_id, title, creator_id, creator_name, origin in entries:
-        if clip_id in seen or creator_id == OWN_VOD:
+        if (clip_id, creator_id) in seen or creator_id == OWN_VOD:
             continue
         creator = registry.get(creator_id)
         status = creator.permission_status if creator else "unbekannt (nicht im Register)"
         if status != STATUS_ALLOWED:
-            seen.add(clip_id)
+            seen.add((clip_id, creator_id))
             name = creator.name if creator else creator_name
             blockers.append(Blocker(clip_id, title, creator_id, name, status, origin))
     return blockers

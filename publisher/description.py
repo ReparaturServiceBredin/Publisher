@@ -56,13 +56,17 @@ def credit_info(creator_id: str, fallback_name: str, registry: CreatorRegistry, 
     )
 
 
-def overlay_text_for(clip: Candidate, registry: CreatorRegistry, settings: Settings) -> str:
-    if clip.is_own:
+def _overlay_one(creator_id: str, name: str, registry: CreatorRegistry) -> str:
+    if creator_id == OWN_VOD:
         return ""  # eigene Clips brauchen keine Fremd-Einblendung
-    creator = registry.get(clip.creator_id)
-    if creator is None:
-        return f"Clip von {clip.source.creator_name}"
-    return creator.overlay_text()
+    creator = registry.get(creator_id)
+    return creator.overlay_text() if creator else f"Clip von {name}"
+
+
+def overlay_text_for(clip: Candidate, registry: CreatorRegistry, settings: Settings) -> str:
+    texts = [_overlay_one(clip.creator_id, clip.source.creator_name, registry)]
+    texts += [_overlay_one(c["creator_id"], c["creator_name"], registry) for c in clip.companions]
+    return "   |   ".join(t for t in texts if t)
 
 
 @dataclass
@@ -95,6 +99,11 @@ def clip_credit_block(
         lines.append(f"   {info.link_line()}")
     if info.rules.extra_line:
         lines.append(f"   {info.rules.extra_line}")
+    for comp in clip.companions:  # Splitscreen: weitere Streamer im Bild
+        start = clip.trim_start + comp["offset"]
+        link = vod_link_at(comp.get("vod_url"), start)
+        src = f"{link} (ab {format_hms(start)})" if link else f"ab {format_hms(start)}"
+        lines.append(f"   Mit im Bild: {comp['creator_name']} | Original-VOD: {src}")
     return "\n".join(lines)
 
 
@@ -132,8 +141,12 @@ def build_chapters(clips: list[Candidate], total_duration: float) -> tuple[list[
 def _creator_list(clips: list[Candidate], registry: CreatorRegistry, settings: Settings) -> list[str]:
     seen: dict[str, CreditInfo] = {}
     for c in clips:
-        if c.creator_id not in seen:
-            seen[c.creator_id] = credit_info(c.creator_id, c.source.creator_name, registry, settings)
+        people = [(c.creator_id, c.source.creator_name)] + [
+            (comp["creator_id"], comp["creator_name"]) for comp in c.companions
+        ]
+        for creator_id, name in people:
+            if creator_id not in seen:
+                seen[creator_id] = credit_info(creator_id, name, registry, settings)
     lines = []
     for info in seen.values():
         line = f"• {info.name}"

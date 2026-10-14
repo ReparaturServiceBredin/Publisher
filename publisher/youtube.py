@@ -65,7 +65,8 @@ def get_service(settings: Settings):
             creds = flow.run_local_server(port=0)
         token_file.parent.mkdir(parents=True, exist_ok=True)
         token_file.write_text(creds.to_json(), encoding="utf-8")
-    return build("youtube", "v3", credentials=creds, cache_discovery=False)
+    # Discovery-Dokument online laden (die mitgelieferten Dokumente würden die .exe um viele MB aufblähen)
+    return build("youtube", "v3", credentials=creds, cache_discovery=False, static_discovery=False)
 
 
 def _rfc3339(when: datetime) -> str:
@@ -251,3 +252,101 @@ def revoke_schedule_if_blocked(project: Project, registry: CreatorRegistry, sett
         reasons=[b.describe() for b in blockers],
     )
     return True
+
+
+# ---------------------------------------------------------------- Desktop-App: verbinden + Datei hochladen
+
+def client_secret_path(settings: Settings) -> Path:
+    return settings.path(settings["youtube"]["client_secret_file"])
+
+
+def token_path(settings: Settings) -> Path:
+    return settings.path(settings["youtube"]["token_file"])
+
+
+def is_connected(settings: Settings) -> bool:
+    return token_path(settings).exists()
+
+
+def connect(settings: Settings, client_secret: str | Path | None = None) -> str:
+    """Einmalig: OAuth-Client-Datei übernehmen, im Browser anmelden. Gibt den Kanalnamen zurück."""
+    import shutil
+
+    if client_secret:
+        target = client_secret_path(settings)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if Path(client_secret).resolve() != target.resolve():
+            shutil.copy(client_secret, target)
+    return channel_title(settings, get_service(settings))
+
+
+def disconnect(settings: Settings) -> None:
+    token_path(settings).unlink(missing_ok=True)
+
+
+def channel_title(settings: Settings, service=None) -> str:
+    service = service or get_service(settings)
+    items = service.channels().list(part="snippet", mine=True).execute().get("items", [])
+    return items[0]["snippet"]["title"] if items else "(kein Kanal)"
+
+
+def upload_file(
+    path: str | Path,
+    settings: Settings,
+    *,
+    title: str,
+    description: str,
+    tags: list[str] | None = None,
+    privacy: str = "private",
+    category_id: str | None = None,
+    publish_at: datetime | None = None,
+    thumbnail: str | Path | None = None,
+    service=None,
+    progress=None,
+) -> dict:
+    """Lädt eine fertige Datei hoch. Freigabe-Prüfung macht der Aufrufer (videobox.py)."""
+    from googleapiclient.http import MediaFileUpload
+
+    if privacy not in ("private", "unlisted", "public"):
+        raise ValueError(f"Ungültige Sichtbarkeit {privacy!r}")
+    service = service or get_service(settings)
+    yt = settings["youtube"]
+    status = {"privacyStatus": privacy, "selfDeclaredMadeForKids": False}
+    if publish_at is not None:
+        _check_future(publish_at)
+        status = {"privacyStatus": "private", "publishAt": _rfc3339(publish_at), "selfDeclaredMadeForKids": False}
+    body = {
+        "snippet": {
+            "title": title[:100],
+            "description": description[:5000],
+            "tags": tags or [],
+            "categoryId": category_id or yt["default_category_id"],
+            "defaultLanguage": yt.get("default_language", "de"),
+            "defaultAudioLanguage": yt.get("default_language", "de"),
+        },
+        "status": status,
+    }
+    media = MediaFileUpload(str(path), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)
+    request = service.videos().insert(part="snippet,status", body=body, media_body=media)
+    if progress:
+        orig = request.next_chunk
+
+        def next_chunk(*a, **k):
+            st, resp = orig(*a, **k)
+            if st:
+                progress(st.progress())
+            return st, resp
+
+        request.next_chunk = next_chunk
+    response = _resumable_upload(request)
+    video_id = response["id"]
+    if thumbnail and Path(thumbnail).exists():
+        service.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(str(thumbnail))).execute()
+    return {
+        "platform": "youtube",
+        "video_id": video_id,
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+        "privacy": status["privacyStatus"],
+        "publish_at": status.get("publishAt"),
+        "uploaded_at": now_utc().isoformat(),
+    }

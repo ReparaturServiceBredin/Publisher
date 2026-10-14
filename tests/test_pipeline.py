@@ -76,10 +76,12 @@ def rendered(project, registry, settings, sample_video):
 def test_export_renders_video_with_positions(rendered, sample_video):
     project, manifest = rendered
     duration = render.probe_duration(manifest["video"])
-    assert abs(duration - 7) < 0.3
+    # 4 s + 3 s mit 0,5 s Überblendung dazwischen
+    assert abs(duration - 6.5) < 0.3
     clips = manifest["clips"]
     assert clips[0]["highlight_start"] == 0
-    assert abs(clips[1]["highlight_start"] - 4) < 0.2
+    assert abs(clips[1]["highlight_start"] - 3.5) < 0.2
+    assert abs(manifest["duration"] - duration) < 0.3
     assert clips[0]["original_detection"]["vod_start"] == 3723  # Original-Erkennung bleibt erhalten
     assert clips[0]["creator_name"] == "Anna"
     out = project.dir / "exports"
@@ -87,7 +89,43 @@ def test_export_renders_video_with_positions(rendered, sample_video):
     assert [o.read_text(encoding="utf-8") for o in overlays] == ["Clip von Anna – twitch.tv/anna_live"]
     stored = json.loads(open(project.last_export["manifest"], encoding="utf-8").read())
     assert stored["description"].startswith("Clips mit Genehmigung von Anna")
-    assert "Kapitel:\n00:00 Der große Fail\n00:04 Mein Moment" in stored["description"]
+    assert "Kapitel:\n00:00 Der große Fail\n00:03 Mein Moment" in stored["description"]
+
+
+def test_export_without_transitions(project, registry, settings, sample_video):
+    for vod in project.vods.values():
+        vod.path = str(sample_video)
+        vod.duration = 12
+    project.apply_review_edit(project.candidates[0].id, {"trim_start": 1, "trim_end": 5})
+    project.apply_review_edit(project.candidates[1].id, {"trim_start": 6, "trim_end": 9})
+    settings.raw["transitions"]["enabled"] = False
+    manifest = export_project(project, registry, settings)
+    assert abs(render.probe_duration(manifest["video"]) - 7) < 0.3
+    assert abs(manifest["clips"][1]["highlight_start"] - 4) < 0.2
+
+
+def test_split_screen_clip(project, registry, settings, sample_video):
+    """Zwei Streamer gleichzeitig: Splitscreen, beide in Credits und Freigabe-Prüfung."""
+    from publisher.gate import find_blockers
+
+    for vod in project.vods.values():
+        vod.path = str(sample_video)
+        vod.duration = 12
+    anna_vod, own_vod = list(project.vods)
+    v_ben = project.add_vod(str(sample_video), "ben", "Ben", datetime(2026, 10, 12, 20, 14, tzinfo=settings.tz),
+                            vod_url="https://www.twitch.tv/videos/777", duration=12)
+    clip = project.candidates[0]
+    project.apply_review_edit(clip.id, {"trim_start": 2, "trim_end": 6})
+    project.apply_review_edit(project.candidates[1].id, {"status": CLIP_REJECTED})
+    clip.companions = [{"vod_id": v_ben.id, "creator_id": "ben", "creator_name": "Ben",
+                        "vod_url": v_ben.vod_url, "live_start": v_ben.live_start, "offset": 1.0}]
+    project.save()
+    manifest = export_project(project, registry, settings)
+    info = render.probe(manifest["video"])
+    assert (info["width"], info["height"]) == (320, 180) and abs(info["duration"] - 4) < 0.3
+    assert "Mit im Bild: Ben | Original-VOD: https://www.twitch.tv/videos/777?t=0h0m3s (ab 0:00:03)" in manifest["description"]
+    assert "• Ben" in manifest["description"]
+    assert any(b.creator_id == "ben" for b in find_blockers(project, registry))  # Ben ist nur „angefragt“
 
 
 def test_overlay_only_first_seconds(settings):
