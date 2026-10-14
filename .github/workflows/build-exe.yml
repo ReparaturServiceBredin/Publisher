@@ -49,6 +49,7 @@ jobs:
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed --name Publisher
           --collect-data imageio_ffmpeg
+          --collect-data tzdata
           --collect-submodules yt_dlp
           --hidden-import publisher.gui
           --exclude-module flask --exclude-module anthropic
