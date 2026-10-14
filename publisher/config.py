@@ -94,5 +94,15 @@ def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
     if path.exists():
         with path.open(encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
-    base = path.resolve().parent if path.exists() else Path.cwd()
-    return Settings(raw=_merge(DEFAULTS, raw), base_dir=base)
+    return Settings(raw=_merge(DEFAULTS, raw), base_dir=path.resolve().parent)
+
+
+def app_home() -> Path:
+    """Arbeitsordner der Desktop-App: C:\\Users\\<Name>\\Publisher (oder $PUBLISHER_HOME)."""
+    home = Path(os.environ.get("PUBLISHER_HOME") or Path.home() / "Publisher")
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def load_app_settings() -> Settings:
+    return load_settings(app_home() / "config.yaml")

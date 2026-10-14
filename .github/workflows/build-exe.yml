@@ -1,0 +1,77 @@
+name: Windows-EXE bauen
+
+# Jeder Push baut eine neue Publisher.exe und veröffentlicht sie als GitHub-Release.
+# Die installierte .exe prüft beim Start das neueste Release und aktualisiert sich selbst.
+on:
+  push:
+    branches: [main, master, "claude/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-exe
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - run: pip install -e ".[dev,llm]"
+      - run: pytest -q
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Versionsnummer setzen
+        shell: bash
+        run: |
+          VERSION="1.0.${{ github.run_number }}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          printf '"""Wird beim Bauen der .exe automatisch überschrieben."""\n\n__version__ = "%s"\n' "$VERSION" > publisher/_version.py
+
+      - name: Abhängigkeiten
+        run: pip install ".[exe]"
+
+      - name: EXE bauen
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed --name Publisher
+          --collect-data imageio_ffmpeg
+          --collect-submodules yt_dlp
+          --hidden-import publisher.gui
+          --exclude-module flask --exclude-module anthropic
+          publisher_app.py
+
+      - name: Selbsttest der fertigen EXE
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\Publisher.exe -ArgumentList '--selftest','selftest.txt' -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Publisher-${{ env.VERSION }}
+          path: dist/Publisher.exe
+
+      - name: Release veröffentlichen (Quelle für Auto-Update)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" dist/Publisher.exe \
+            --title "Publisher $VERSION" \
+            --notes "Automatisch gebaut aus ${GITHUB_SHA::7}. Herunterladen: Publisher.exe" \
+            --target "$GITHUB_SHA" --latest

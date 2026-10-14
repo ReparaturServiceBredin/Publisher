@@ -50,6 +50,19 @@ class Vod:
     stream_title: str = ""
     duration: float | None = None
     imported_at: str = field(default_factory=lambda: _iso(now_utc()))
+    # Nur teilweise heruntergeladen: [{"start": s, "end": s, "path": "..."}] (Zeiten im Original-VOD)
+    segments: list[dict] = field(default_factory=list)
+
+    def source_for(self, start: float, end: float) -> tuple[str, float]:
+        """Datei + Offset, aus der der Bereich [start, end] des Original-VODs geschnitten werden kann."""
+        for seg in self.segments:
+            if seg["start"] <= start + 0.01 and end <= seg["end"] + 0.01:
+                return seg["path"], seg["start"]
+        if self.path and Path(self.path).exists():
+            return self.path, 0.0
+        raise ProjectError(
+            f"Der Bereich {start:.0f}s–{end:.0f}s von {self.id} wurde nicht heruntergeladen."
+        )
 
     @property
     def is_own(self) -> bool:

@@ -1,4 +1,3 @@
-import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -7,6 +6,7 @@ import pytest
 import yaml
 
 from publisher.config import load_settings
+from publisher.ffmpeg_bin import ffmpeg_exe
 from publisher.creators import OWN_VOD, CreatorRegistry
 from publisher.models import CLIP_SELECTED, ProjectStore
 
@@ -85,7 +85,12 @@ def project(store, settings):
 
 
 def _have_ffmpeg() -> bool:
-    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+    try:
+        from publisher.ffmpeg_bin import ffmpeg_exe
+
+        return bool(ffmpeg_exe())
+    except RuntimeError:
+        return False
 
 
 needs_ffmpeg = pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg nicht installiert")
@@ -98,7 +103,7 @@ def sample_video(tmp_path_factory) -> Path:
     out = tmp_path_factory.mktemp("media") / "vod.mp4"
     subprocess.run(
         [
-            "ffmpeg", "-y", "-loglevel", "error",
+            ffmpeg_exe(), "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "testsrc=size=640x360:rate=25:duration=12",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=12",
             "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", str(out),

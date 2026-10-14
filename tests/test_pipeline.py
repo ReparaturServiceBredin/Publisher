@@ -115,8 +115,7 @@ def test_short_export(project, registry, settings, sample_video):
     project.meta.title = "Fail"
     manifest = export_project(project, registry, settings)
     info = render.probe(manifest["video"])
-    v = next(s for s in info["streams"] if s["codec_type"] == "video")
-    assert (v["width"], v["height"]) == (180, 320)
+    assert (info["width"], info["height"]) == (180, 320) and info["has_audio"]
     assert manifest["title"] == "Fail #Shorts"
     assert "#Shorts" in manifest["description"] and "Clip von Anna" in manifest["description"]
 

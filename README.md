@@ -1,5 +1,33 @@
 # Publisher
 
+## Schnellstart: Publisher.exe (Windows)
+
+1. **Herunterladen:** Unter [Releases](https://github.com/ReparaturServiceBredin/Publisher/releases/latest)
+   die Datei `Publisher.exe` laden.
+2. **Ablegen:** Ordner `C:\Publisher` anlegen und die exe dort hineinlegen (nicht direkt nach `C:\`
+   und nicht in „Programme“, sonst darf sie sich nicht selbst aktualisieren).
+3. **Starten:** Doppelklick. Beim ersten Mal warnt Windows evtl. („Der Computer wurde durch Windows
+   geschützt“): *Weitere Informationen → Trotzdem ausführen*.
+4. **Benutzen:** VOD-Link (Twitch/YouTube) einfügen oder eine Datei wählen → **Highlights erstellen**.
+
+Ergebnis in `C:\Users\<Name>\Publisher\Fertig\…`:
+- `<Titel>.mp4`: Highlight-Video (Länge wählbar, Standard 12 Minuten)
+- `Einzelclips\01 Highlight 1.mp4`, …: jeder Moment einzeln
+- `Beschreibung.txt`: Titel, Kapitelmarken und Credits zum Kopieren
+
+**Updates:** Jeder neue Stand in diesem Repo baut automatisch eine neue `Publisher.exe` (GitHub Actions →
+Release). Die exe prüft beim Start, ob es eine neuere Version gibt, lädt sie und startet sich neu.
+Kein Passwort und kein Login nötig.
+
+**Wie werden Highlights gefunden?** Über die Tonspur: Momente, die deutlich lauter sind als der normale
+Pegel des Streams (Schreien, Lachen, Jubel, Action). Jeder Treffer bekommt etwa 20 s Vorlauf und 8 s
+Nachlauf. Bei Links wird zuerst nur die Tonspur geladen, danach nur die Highlight-Abschnitte als Video.
+Das ganze VOD muss also nicht heruntergeladen werden.
+
+---
+
+## Für Entwickler
+
 Macht Highlight-Videos und Shorts aus eigenen und fremden Twitch-/YouTube-VODs:
 mit vollständigen Quellenangaben, automatischen Credits und Upload über die YouTube Data API v3.
 

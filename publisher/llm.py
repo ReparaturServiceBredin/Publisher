@@ -76,7 +76,7 @@ def generate_intro(project: Project, clips: list[Candidate], settings: Settings)
     try:
         import anthropic
     except ImportError:
-        return fallback_intro(project, clips), "Paket 'anthropic' fehlt – Vorlagentext verwendet."
+        return fallback_intro(project, clips), None  # z. B. in der .exe: einfach Vorlagentext
 
     try:
         client = anthropic.Anthropic()

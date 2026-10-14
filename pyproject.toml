@@ -10,6 +10,9 @@ requires-python = ">=3.10"
 dependencies = [
     "PyYAML>=6",
     "Flask>=3",
+    "numpy>=1.26",
+    "yt-dlp>=2025.1.1",
+    "imageio-ffmpeg>=0.5",
 ]
 
 [project.optional-dependencies]
@@ -17,6 +20,7 @@ llm = ["anthropic>=1.0"]
 youtube = ["google-api-python-client>=2", "google-auth-oauthlib>=1"]
 all = ["anthropic>=1.0", "google-api-python-client>=2", "google-auth-oauthlib>=1"]
 dev = ["pytest>=8"]
+exe = ["pyinstaller>=6"]
 
 [project.scripts]
 publisher = "publisher.cli:main"
