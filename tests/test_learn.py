@@ -155,3 +155,64 @@ def test_parse_number_formats():
     assert parse_number("") is None
     with pytest.raises(ValueError):
         parse_number("viele")
+
+
+def test_add_reference_by_link(tmp_path, monkeypatch):
+    """YouTube-/TikTok-Link: Video wird geladen, analysiert, öffentliche Zahlen übernommen."""
+    import shutil
+
+    from publisher import fetch
+
+    src = make_video(tmp_path / "src.mp4", cuts_every=1.5, vertical=True, dur=9)
+    infos = {
+        "https://www.youtube.com/shorts/abc123": {
+            "extractor_key": "Youtube", "title": "Krasser Clip", "uploader": "KanalX", "width": 360, "height": 640,
+            "duration": 9, "view_count": 250000, "like_count": 12000, "comment_count": 340,
+            "webpage_url": "https://www.youtube.com/shorts/abc123"},
+        "https://www.tiktok.com/@x/video/1": {
+            "extractor_key": "TikTok", "title": "Tok", "uploader": "x", "view_count": 900, "repost_count": 4,
+            "webpage_url": "https://www.tiktok.com/@x/video/1"},
+    }
+
+    def fake_download(url, dest, name, progress=None):
+        if url not in infos:
+            raise fetch.LinkError("Das Video ist privat.")
+        dest.mkdir(parents=True, exist_ok=True)
+        if progress:
+            progress("Lade Video", 0.5)
+        return Path(shutil.copy(src, dest / f"{name}.mp4")), infos[url]
+
+    from pathlib import Path
+
+    monkeypatch.setattr(fetch, "download_reference", fake_download)
+    lib = learn.Library(tmp_path / "lib")
+    v = lib.add_url("https://www.youtube.com/shorts/abc123")
+    lib.analyze(v)
+    assert v.platform == "YouTube Shorts" and v.title == "Krasser Clip" and v.channel == "KanalX"
+    assert v.metrics == {"views": 250000, "likes": 12000, "comments": 340}
+    assert v.analysis["cuts"] >= 4 and v.analysis["vertical"]
+    t = lib.add_url("https://www.tiktok.com/@x/video/1")
+    assert t.platform == "TikTok" and t.metrics == {"views": 900, "shares": 4}
+    with pytest.raises(learn.UnsupportedVideo, match="schon"):
+        lib.add_url("https://www.youtube.com/shorts/abc123/")
+    with pytest.raises(learn.UnsupportedVideo, match="privat"):
+        lib.add_url("https://youtu.be/privat")
+    with pytest.raises(learn.UnsupportedVideo, match="kein Link"):
+        lib.add_url("hallo welt")
+
+    # Zahlen aktualisieren: automatische Werte neu, von Hand geänderte bleiben
+    lib.update(v, metrics={**v.metrics, "likes": 99, "retention_pct": 61})
+    monkeypatch.setattr(fetch, "fetch_metrics", lambda url: {"views": 300000, "likes": 15000, "comments": 400})
+    lib.refresh_metrics(v)
+    assert v.metrics == {"views": 300000, "comments": 400, "likes": 99, "retention_pct": 61}
+    again = learn.Library(tmp_path / "lib").get(v.id)
+    assert again.source_url.endswith("abc123") and again.metrics["views"] == 300000
+
+
+def test_platform_and_metrics_helpers():
+    from publisher import fetch
+
+    assert fetch.platform_of({"extractor_key": "Youtube", "width": 1920, "height": 1080, "duration": 600}) == "YouTube"
+    assert fetch.platform_of({"extractor_key": "Instagram"}) == "Instagram"
+    assert fetch.public_metrics({"view_count": 5, "like_count": None}) == {"views": 5.0}
+    assert "privat" in fetch._friendly(Exception("ERROR: [youtube] x: Private video"))

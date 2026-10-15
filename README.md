@@ -34,8 +34,11 @@ Ergebnis in `C:\Users\<Name>\Publisher\Fertig\<Datum Titel>\`:
 Oben rechts: **⟳ Update** mit der aktuellen Versionsnummer daneben.
 
 ### Referenzvideos: aus fertigen Videos lernen
-1. **Referenzvideos → Videos:** fertige Videos ins Fenster ziehen oder „Dateien auswählen“ (mehrere gleichzeitig).
-   Sie werden in `C:\Users\<Name>\Publisher\Referenzvideos` kopiert und automatisch analysiert.
+1. **Referenzvideos → Videos:** fertige Videos ins Fenster ziehen oder „Dateien auswählen“ (mehrere gleichzeitig) –
+   **oder einen Link einfügen** (YouTube, Shorts, TikTok, Instagram, Twitch …; mehrere mit Leerzeichen, Links
+   lassen sich auch aus dem Browser ins Fenster ziehen). Link-Videos werden in 720p geladen, Views/Likes/Kommentare
+   automatisch übernommen („Zahlen aktualisieren“ holt später die aktuellen Werte). Alles landet in
+   `C:\Users\<Name>\Publisher\Referenzvideos` und wird automatisch analysiert.
 2. **Bearbeiten:** Plattform, „Wie lief es?“ (gut / mittel / schlecht) und optional Views, Ø Wiedergabedauer,
    Retention, Likes, Kommentare und Shares eintragen (Zahlen auch als „12.500“, „1,2k“, „3 Mio“).
    Falsch erkannte Merkmale (Untertitel, Musik, Text im Hook, CTA, Hook-Zeit) lassen sich dort korrigieren.

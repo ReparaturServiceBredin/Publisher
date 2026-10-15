@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import webbrowser
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -75,6 +76,8 @@ class ReferencePage:
         self.library = learn.Library(app.settings.base_dir / "Referenzvideos")
         self.lock = threading.RLock()
         self.busy_ids: set[str] = set()
+        self.pending: dict[str, str] = {}  # Link → Statustext während des Downloads
+        self.pending_labels: dict[str, ctk.CTkLabel] = {}
         self._thumbs: list = []
         self.profile = self._build_profile()
 
@@ -94,16 +97,26 @@ class ReferencePage:
     def _register_drop(self, page) -> None:
         if not getattr(self.app, "dnd_enabled", False):
             return
-        from tkinterdnd2 import DND_FILES
+        from tkinterdnd2 import DND_FILES, DND_TEXT
 
         for widget in (page, self.body, getattr(self.body, "_parent_canvas", None)):
             if widget is None:
                 continue
             try:
-                widget.drop_target_register(DND_FILES)
-                widget.dnd_bind("<<Drop>>", lambda e: self.add_files(self.app.tk.splitlist(e.data)))
+                widget.drop_target_register(DND_FILES, DND_TEXT)
+                widget.dnd_bind("<<Drop>>", self._on_drop)
             except (tk.TclError, AttributeError):
                 logging.info("Drag & Drop für %s nicht verfügbar", widget)
+
+    def _on_drop(self, event) -> None:
+        from . import fetch
+
+        data = event.data or ""
+        items = data.split() if fetch.is_url(data.strip()) else self.app.tk.splitlist(data)
+        urls = [i for i in items if fetch.is_url(i)]
+        files = [i for i in items if not fetch.is_url(i)]
+        self.add_urls(urls)
+        self.add_files(files)
 
     # ------------------------------------------------------------ Daten
     def _build_profile(self) -> learn.Profile:
@@ -151,6 +164,74 @@ class ReferencePage:
                 messagebox.showwarning("Nicht alle Videos übernommen", "\n\n".join(lines)[:1800])
 
         self.app.run_bg(job, done)
+
+    def add_urls(self, urls) -> None:
+        from . import fetch
+
+        urls = [u.strip() for u in urls if u.strip()]
+        bad = [u for u in urls if not fetch.is_url(u)]
+        urls = [u for u in urls if fetch.is_url(u) and u not in self.pending]
+        if bad:
+            messagebox.showwarning("Kein Link", "Das sieht nicht nach einem Video-Link aus:\n\n" + "\n".join(bad[:5]))
+        if not urls:
+            return
+        for u in urls:
+            self.pending[u] = "Warte …"
+        self.refresh()
+        self.app.write_status(f"Lade {len(urls)} Referenzvideo(s) per Link …")
+
+        def set_status(url, text):
+            self.pending[url] = text
+            label = self.pending_labels.get(url)
+            if label is not None and label.winfo_exists():
+                label.configure(text=text)
+
+        def job():
+            added, errors = [], []
+            for u in urls:
+                last = [-1]
+
+                def progress(msg, frac, u=u):
+                    pct = int(frac * 100)
+                    if pct != last[0]:
+                        last[0] = pct
+                        self.app.events.put(("call", lambda _r, t=f"{msg} … {pct} %": set_status(u, t), None))
+
+                try:
+                    v = self.library.add_url(u, progress)  # Download ohne Sperre, Eintrag intern gesichert
+                    added.append(v)
+                    self.app.events.put(("call", lambda _r, u=u: set_status(u, "Analysiere …"), None))
+                    result = learn.run_analysis(self.library.path(v))
+                    with self.lock:
+                        self.library.apply_analysis(v, *result)
+                except learn.UnsupportedVideo as exc:
+                    errors.append(f"{u}\n→ {exc}")
+                finally:
+                    self.pending.pop(u, None)
+                    self.app.events.put(("call", lambda _r: (self.profile_changed(), self.refresh()), None))
+            return added, errors
+
+        def done(result):
+            added, errors = result
+            self.app.write_status(f"{len(added)} Link-Video(s) hinzugefügt und analysiert.")
+            failed = [v for v in added if v.error]
+            if errors or failed:
+                lines = errors + [f"„{v.title}“: {v.error}" for v in failed]
+                messagebox.showwarning("Nicht alle Links übernommen", "\n\n".join(lines)[:1800])
+
+        self.app.run_bg(job, done)
+
+    def refresh_metrics(self, video: learn.RefVideo) -> None:
+        def job():
+            with self.lock:
+                return self.library.refresh_metrics(video)
+
+        def done(v):
+            self.profile_changed()
+            self.refresh()
+            self.app.write_status(f"Zahlen für „{v.title}“ aktualisiert.")
+
+        self.app.run_bg(job, done, lambda e: messagebox.showerror("Zahlen aktualisieren", str(e)))
 
     def pick_files(self) -> None:
         exts = " ".join(f"*{e}" for e in sorted(learn.SUPPORTED_EXT))
@@ -215,15 +296,37 @@ class ReferencePage:
 
         drop = ctk.CTkFrame(self.body, fg_color="#191926", corner_radius=14, border_width=2, border_color="#3B3360")
         drop.pack(fill="x", padx=12, pady=8)
-        hint = "Videos hierher ziehen" if getattr(self.app, "dnd_enabled", False) else "Videos hinzufügen"
+        hint = "Videos oder Links hierher ziehen" if getattr(self.app, "dnd_enabled", False) else "Videos hinzufügen"
         ctk.CTkLabel(drop, text=f"⇩  {hint}", font=font(17, "bold")).pack(pady=(18, 2))
         ctk.CTkLabel(drop, text="Fertig geschnittene Videos (mp4, mov, mkv, webm …). Mehrere gleichzeitig möglich.",
                      font=font(12), text_color=MUTED).pack()
-        accent_button(drop, "Dateien auswählen", self.pick_files, width=180).pack(pady=(10, 18))
+        accent_button(drop, "Dateien auswählen", self.pick_files, width=180).pack(pady=(10, 10))
+        link_row = ctk.CTkFrame(drop, fg_color="transparent")
+        link_row.pack(fill="x", padx=40, pady=(4, 18))
+        ctk.CTkLabel(link_row, text="oder Link:", font=font(12), text_color=MUTED).pack(side="left", padx=(0, 8))
+        link_entry = ctk.CTkEntry(link_row, height=36, corner_radius=10, border_color="#34344A",
+                                  placeholder_text="YouTube-, Shorts-, TikTok- oder Instagram-Link (mehrere mit Leerzeichen)")
+        link_entry.pack(side="left", fill="x", expand=True)
+
+        def submit(_e=None):
+            text = link_entry.get()
+            link_entry.delete(0, "end")
+            self.add_urls(text.split())
+
+        link_entry.bind("<Return>", submit)
+        accent_button(link_row, "Link hinzufügen", submit, width=140, height=36).pack(side="left", padx=(8, 0))
+        self.pending_labels.clear()
+        for url, text in self.pending.items():
+            pc = card(self.body)
+            pc.pack(fill="x", padx=12, pady=6)
+            ctk.CTkLabel(pc, text=f"⇩  {url}", font=font(13, "bold"), wraplength=760, justify="left").pack(anchor="w", padx=18, pady=(12, 0))
+            lab = ctk.CTkLabel(pc, text=text, font=font(12), text_color=WARN)
+            lab.pack(anchor="w", padx=18, pady=(0, 12))
+            self.pending_labels[url] = lab
         with self.lock:
             videos = list(reversed(self.library.videos))
             scores = learn.success_scores(self.library.learning_set())
-        if not videos:
+        if not videos and not self.pending:
             ctk.CTkLabel(self.body, text="Noch keine Referenzvideos. Am besten 4+ Videos mit Ergebnis (gut/schlecht oder Zahlen).",
                          font=font(13), text_color=MUTED).pack(pady=24)
             return
@@ -246,11 +349,16 @@ class ReferencePage:
                 if text:
                     ctk.CTkLabel(top, text=text, font=font(11), fg_color="#24243A", corner_radius=8,
                                  text_color=color).pack(side="left", padx=(8, 0), ipadx=6)
+            if v.source_url:
+                ctk.CTkLabel(top, text="🔗 Link", font=font(11), fg_color="#24243A", corner_radius=8,
+                             text_color="#9AD1FF").pack(side="left", padx=(8, 0), ipadx=6)
             if v.id in scores:
                 ctk.CTkLabel(top, text=f"Erfolg {scores[v.id] * 100:.0f}/100", font=font(11), text_color=MUTED).pack(side="left", padx=8)
             units = {"retention_pct": " %", "avg_watch_s": " s"}
             metrics = "  ·  ".join(f"{learn.METRIC_FIELDS[k].split(' (')[0]} {fmt_number(val)}{units.get(k, '')}"
                                    for k, val in v.metrics.items() if val not in (None, ""))
+            if v.channel:
+                metrics = f"{v.channel}  ·  {metrics}" if metrics else v.channel
             ctk.CTkLabel(c, text=metrics or "Keine Kennzahlen – über „Bearbeiten“ eintragen", font=font(12),
                          text_color="#DADAE8" if metrics else MUTED).grid(row=1, column=1, sticky="w")
             if v.id in self.busy_ids:
@@ -269,6 +377,9 @@ class ReferencePage:
             ghost_button(actions, "▶  Ansehen", lambda vid=v: open_path(self.library.path(vid)), width=140).pack(pady=2)
             accent_button(actions, "Bearbeiten", lambda vid=v: RefEditDialog(self.app, self, vid), width=140).pack(pady=2)
             ghost_button(actions, "Neu analysieren", lambda vid=v: self.reanalyze(vid), width=140).pack(pady=2)
+            if v.source_url:
+                ghost_button(actions, "Zahlen aktualisieren", lambda vid=v: self.refresh_metrics(vid), width=140).pack(pady=2)
+                ghost_button(actions, "Original öffnen", lambda vid=v: webbrowser.open(vid.source_url), width=140).pack(pady=2)
             ctk.CTkButton(actions, text="Löschen", width=140, fg_color="transparent", border_width=1, border_color="#5A2A2A",
                           hover_color="#3A2020", text_color="#FF9A9A", corner_radius=10, font=font(12),
                           command=lambda vid=v: self.delete(vid)).pack(pady=2)
@@ -376,7 +487,12 @@ class RefEditDialog(ctk.CTkToplevel):
         ctk.CTkSegmentedButton(row, values=["gut", "mittel", "schlecht", "keine Angabe"], variable=self.rating,
                                selected_color=ACCENT, selected_hover_color=ACCENT_HOVER).pack(side="left", padx=8)
 
-        label("Kennzahlen (optional – alle Felder leer lassen ist ok)")
+        if video.source_url:
+            label(f"Quelle: {video.source_url}" + (f"  ·  Kanal: {video.channel}" if video.channel else ""))
+            label("Kennzahlen – Views/Likes/Kommentare kamen automatisch aus dem Link; Retention und Wiedergabedauer "
+                  "sind nicht öffentlich, die kannst du für eigene Videos aus YouTube Studio/TikTok Analytics eintragen")
+        else:
+            label("Kennzahlen (optional – alle Felder leer lassen ist ok)")
         grid = ctk.CTkFrame(body, fg_color="transparent")
         grid.pack(fill="x", padx=12)
         self.metric_entries: dict[str, ctk.CTkEntry] = {}

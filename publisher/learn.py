@@ -17,6 +17,7 @@ import json
 import math
 import shutil
 import subprocess
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -354,6 +355,9 @@ class RefVideo:
     analysis: dict = field(default_factory=dict)
     overrides: dict = field(default_factory=dict)
     error: str = ""
+    source_url: str = ""  # bei Link-Videos: Original (YouTube, TikTok …)
+    channel: str = ""
+    metrics_auto: list = field(default_factory=list)  # Kennzahlen, die automatisch aus dem Link kamen
 
     def features(self) -> dict:
         return {**self.analysis, **self.overrides}
@@ -368,17 +372,19 @@ class Library:
         self.root = Path(root)
         self.file = self.root / "library.json"
         self.videos: list[RefVideo] = []
+        self._lock = threading.RLock()  # Downloads/Analysen laufen parallel zur Oberfläche
         if self.file.exists():
             data = json.loads(self.file.read_text(encoding="utf-8"))
             known = set(RefVideo.__dataclass_fields__)
             self.videos = [RefVideo(**{k: v for k, v in d.items() if k in known}) for d in data.get("videos", [])]
 
     def save(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        tmp = self.file.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"videos": [asdict(v) for v in self.videos]}, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        tmp.replace(self.file)
+        with self._lock:
+            self.root.mkdir(parents=True, exist_ok=True)
+            tmp = self.file.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"videos": [asdict(v) for v in self.videos]}, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            tmp.replace(self.file)
 
     def path(self, video: RefVideo) -> Path:
         return self.root / video.file
@@ -414,6 +420,51 @@ class Library:
         self.save()
         return video
 
+    def add_url(self, url: str, progress: Progress = None) -> RefVideo:
+        """Lädt ein Video per Link (YouTube, Shorts, TikTok, Instagram …) und übernimmt öffentliche Zahlen."""
+        from . import fetch
+
+        url = url.strip()
+        if not fetch.is_url(url):
+            raise UnsupportedVideo(f"„{url[:80]}“ ist kein Link.")
+        if not url.lower().startswith("http"):
+            url = f"https://{url}"
+        for v in self.videos:
+            if v.source_url and v.source_url.rstrip("/") == url.rstrip("/"):
+                raise UnsupportedVideo(f"Dieses Video ist schon in den Referenzvideos („{v.title}“).")
+        vid = uuid.uuid4().hex[:10]
+        try:
+            path, info = fetch.download_reference(url, self.root / "videos", vid, progress)
+        except fetch.LinkError as exc:
+            raise UnsupportedVideo(f"Link konnte nicht geladen werden: {exc}") from exc
+        metrics = fetch.public_metrics(info)
+        video = RefVideo(
+            id=vid, title=(info.get("title") or url)[:120], file=f"videos/{path.name}",
+            original_name=url, added_at=now_utc().isoformat(), platform=fetch.platform_of(info, url),
+            metrics=metrics, source_url=info.get("webpage_url") or url,
+            channel=info.get("uploader") or info.get("channel") or "", metrics_auto=sorted(metrics),
+        )
+        with self._lock:
+            self.videos.append(video)
+            self.save()
+        return video
+
+    def refresh_metrics(self, video: RefVideo) -> RefVideo:
+        """Aktuelle Views/Likes/Kommentare für Link-Videos nachladen (manuell eingetragene Werte bleiben)."""
+        from . import fetch
+
+        if not video.source_url:
+            raise UnsupportedVideo("Nur bei Videos, die per Link hinzugefügt wurden.")
+        try:
+            fresh = fetch.fetch_metrics(video.source_url)
+        except fetch.LinkError as exc:
+            raise UnsupportedVideo(f"Zahlen konnten nicht geladen werden: {exc}") from exc
+        manual = {k: v for k, v in video.metrics.items() if k not in video.metrics_auto}
+        video.metrics = {**fresh, **manual}
+        video.metrics_auto = sorted(k for k in fresh if k not in manual)
+        self.save()
+        return video
+
     def analyze(self, video: RefVideo, progress: Progress = None) -> RefVideo:
         return self.apply_analysis(video, *run_analysis(self.path(video), progress))
 
@@ -428,13 +479,16 @@ class Library:
         self.path(video).unlink(missing_ok=True)
         thumb = self.path(video).with_suffix(".thumb.jpg")
         thumb.unlink(missing_ok=True)
-        self.videos = [v for v in self.videos if v.id != video.id]
-        self.save()
+        with self._lock:
+            self.videos = [v for v in self.videos if v.id != video.id]
+            self.save()
 
     def update(self, video: RefVideo, **changes) -> None:
         for key, value in changes.items():
             if key not in ("title", "platform", "rating", "metrics", "notes", "excluded", "overrides"):
                 raise ValueError(f"Feld {key!r} ist nicht änderbar")
+            if key == "metrics":  # von Hand geänderte Zahlen werden beim Aktualisieren nicht überschrieben
+                video.metrics_auto = [k for k in video.metrics_auto if value.get(k) == video.metrics.get(k)]
             setattr(video, key, value)
         self.save()
 

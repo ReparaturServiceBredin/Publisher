@@ -140,3 +140,78 @@ def download_sections(
             path = _downloaded_path(ydl.extract_info(url, download=True))
         segments.append({"start": float(start), "end": float(end), "path": str(path)})
     return segments
+
+
+# ---------------------------------------------------------------- Referenzvideos per Link
+
+REFERENCE_FORMAT = "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b"  # 720p reicht für die Analyse
+
+
+class LinkError(RuntimeError):
+    pass
+
+
+def _friendly(exc: Exception) -> str:
+    text = str(exc)
+    low = text.lower()
+    if "private" in low:
+        return "Das Video ist privat."
+    if "unavailable" in low or "removed" in low or "not available" in low or "404" in low:
+        return "Das Video ist nicht (mehr) verfügbar – gelöscht oder Link falsch?"
+    if "sign in" in low or ("age" in low and "confirm" in low):
+        return "Das Video verlangt eine Anmeldung (z. B. Altersbeschränkung) und kann nicht geladen werden."
+    if "unsupported url" in low:
+        return "Dieser Link wird nicht unterstützt (kein Video-Link erkannt)."
+    if "geo" in low or "country" in low:
+        return "Das Video ist in deinem Land gesperrt."
+    if "urlopen" in low or "timed out" in low or "connection" in low or "resolve" in low:
+        return "Keine Verbindung – bitte Internet prüfen."
+    return text.replace("ERROR: ", "")[:300]
+
+
+def platform_of(info: dict, url: str = "") -> str:
+    ex = (info.get("extractor_key") or info.get("extractor") or "").lower()
+    if "youtube" in ex:
+        w, h = info.get("width") or 0, info.get("height") or 0
+        short = "/shorts/" in (url or info.get("webpage_url", "")) or (h > w and (info.get("duration") or 999) <= 180)
+        return "YouTube Shorts" if short else "YouTube"
+    for key, name in (("tiktok", "TikTok"), ("instagram", "Instagram"), ("twitch", "Twitch"), ("facebook", "Facebook")):
+        if key in ex:
+            return name
+    return "Andere"
+
+
+def public_metrics(info: dict) -> dict:
+    """Öffentliche Zahlen aus den Metadaten (Retention/Wiedergabedauer sind nicht öffentlich)."""
+    mapping = {"views": "view_count", "likes": "like_count", "comments": "comment_count", "shares": "repost_count"}
+    return {k: float(info[v]) for k, v in mapping.items() if isinstance(info.get(v), (int, float))}
+
+
+def download_reference(url: str, dest: Path, name: str, progress: Progress = None) -> tuple[Path, dict]:
+    """Lädt ein Video für die Analyse. Gibt (Datei, Metadaten) zurück; Fehler als LinkError mit klarer Meldung."""
+    import yt_dlp
+
+    dest.mkdir(parents=True, exist_ok=True)
+    opts = {
+        "format": REFERENCE_FORMAT,
+        "merge_output_format": "mp4",
+        "outtmpl": str(dest / f"{name}.%(ext)s"),
+        "progress_hooks": [_hook(progress, "Lade Video")],
+    }
+    try:
+        with _ydl(opts) as ydl:
+            info = ydl.sanitize_info(ydl.extract_info(url, download=True))
+    except yt_dlp.utils.DownloadError as exc:
+        raise LinkError(_friendly(exc)) from exc
+    if info.get("_type") == "playlist":
+        raise LinkError("Das ist eine Playlist – bitte einzelne Video-Links einfügen.")
+    return _downloaded_path(info), info
+
+
+def fetch_metrics(url: str) -> dict:
+    import yt_dlp
+
+    try:
+        return public_metrics(fetch_info(url))
+    except yt_dlp.utils.DownloadError as exc:
+        raise LinkError(_friendly(exc)) from exc
