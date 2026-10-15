@@ -61,6 +61,16 @@ def selftest(out_file: str) -> int:
         from publisher import tiktok, videobox, youtube  # noqa: F401
 
         assert tiktok.chunk_plan(50 * 1024 * 1024)[1] == 5
+
+        # Lernmodul: Referenzvideo analysieren + Drag-&-Drop-Bibliothek muss mitgeliefert sein
+        from publisher import learn
+
+        feats = learn.analyze_video(video)
+        assert feats["duration_s"] > 100 and "cuts_per_min" in feats
+        import tkinterdnd2
+
+        assert (Path(tkinterdnd2.__file__).parent / "tkdnd").is_dir(), "tkdnd fehlt"
+        import publisher.gui_refs  # noqa: F401
         assert "twitch:vod" in names and "youtube" in names, "yt-dlp Extraktoren fehlen"
         msg = f"OK clips={len(result.clips)} video={result.video.stat().st_size} yt-dlp={yt_dlp.version.__version__}"
         ok = len(result.clips) == 2 and len(result.vertical) == 2

@@ -39,6 +39,11 @@ class Options:
     layout: str = LAYOUT_POV
     vertical: bool = True
     transitions: bool = True
+    pre_roll: float = 20.0  # Sekunden vor dem Höhepunkt (kleiner = Clip startet näher an der Action)
+    max_clip: float = 75.0  # maximale Cliplänge (kleiner = mehr Schnitte)
+
+    def pick_kwargs(self) -> dict:
+        return {"pre_roll": self.pre_roll, "max_clip": self.max_clip}
 
 
 @dataclass
@@ -151,9 +156,9 @@ def _read_source(text: str, settings: Settings, registry: CreatorRegistry, progr
 
 # ---------------------------------------------------------------- Planung
 
-def _plan_single(src: _Source, target: float) -> list[_Plan]:
+def _plan_single(src: _Source, target: float, opts: Options) -> list[_Plan]:
     a = src.analysis
-    picks = detect.pick_with_fallback(src.curve, target, loudness=a.loudness)
+    picks = detect.pick_with_fallback(src.curve, target, loudness=a.loudness, **opts.pick_kwargs())
     return [_Plan(0, h.start, min(h.end, src.duration), f"Highlight {i}", i) for i, h in enumerate(picks, start=1)]
 
 
@@ -170,7 +175,7 @@ def _sync_sources(sources: list[_Source]) -> list[str]:
     return notes
 
 
-def _plan_multi(sources: list[_Source], target: float, layout: str) -> list[_Plan]:
+def _plan_multi(sources: list[_Source], target: float, layout: str, opts: Options) -> list[_Plan]:
     g0 = min(0.0, min(-s.offset for s in sources))
     g_end = max(s.duration - s.offset for s in sources)
     length = int(np.ceil(g_end - g0))
@@ -186,7 +191,7 @@ def _plan_multi(sources: list[_Source], target: float, layout: str) -> list[_Pla
     # Momente, in denen mehrere Streamer gleichzeitig reagieren, zählen mehr
     combined = top[0] + (0.5 * np.clip(top[1], 0, None) if len(sources) > 1 else 0)
     share = 0.75 if layout == LAYOUT_POV else 1.0
-    moments = detect.pick_with_fallback(combined, target * share)
+    moments = detect.pick_with_fallback(combined, target * share, **opts.pick_kwargs())
 
     plans: list[_Plan] = []
     for k, m in enumerate(moments, start=1):
@@ -277,12 +282,12 @@ def make_highlights(
         )
 
     if len(srcs) == 1:
-        plans = _plan_single(srcs[0], detect.target_length(srcs[0].duration, opts.minutes))
+        plans = _plan_single(srcs[0], detect.target_length(srcs[0].duration, opts.minutes), opts)
     else:
         progress("Synchronisiere VODs", 0.0)
         warnings += _sync_sources(srcs)
         longest = max(s.duration for s in srcs)
-        plans = _plan_multi(srcs, detect.target_length(longest, opts.minutes), opts.layout)
+        plans = _plan_multi(srcs, detect.target_length(longest, opts.minutes), opts.layout, opts)
     if not plans:
         raise RuntimeError("Es wurden keine Highlights gefunden.")
 

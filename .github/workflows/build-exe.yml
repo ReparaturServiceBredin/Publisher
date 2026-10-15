@@ -51,6 +51,9 @@ jobs:
           --collect-data imageio_ffmpeg
           --collect-data tzdata
           --collect-data customtkinter
+          --collect-all tkinterdnd2
+          --hidden-import publisher.gui_refs
+          --hidden-import publisher.learn
           --collect-submodules yt_dlp
           --hidden-import publisher.gui
           --hidden-import publisher.tiktok

@@ -15,12 +15,13 @@
 Release). Die exe prüft beim Start, ob es eine neuere Version gibt, lädt sie herunter und startet sich neu.
 Kein Passwort und kein Login nötig.
 
-### Die vier Bereiche der App
+### Die Bereiche der App
 
 | Bereich | Wofür |
 |---|---|
-| **Erstellen** | Quellen eintragen, Länge (5–15 Min), Fokus („Lachen“ oder „Alles Laute“), Layout bei mehreren VODs, Übergänge, Hochformat-Clips |
+| **Erstellen** | Quellen eintragen, Länge (5–15 Min), Fokus („Lachen“ oder „Alles Laute“), Layout bei mehreren VODs, Übergänge, Hochformat-Clips, Empfehlungen aus dem Erfolgsprofil |
 | **Videobox** | Alle fertigen Videos mit Vorschaubild; abspielen, Ordner öffnen, **direkt zu YouTube oder TikTok hochladen** |
+| **Referenzvideos** | Fertige Videos hochladen, Ergebnisse eintragen, **Erfolgsprofil** ansehen |
 | **Verbindungen** | YouTube- und TikTok-Konto einmalig verbinden |
 | **Freigaben** | Pro Creator „erlaubt / angefragt / nicht erlaubt“ – nur freigegebene Clips (oder eigene VODs) lassen sich hochladen |
 
@@ -29,6 +30,36 @@ Ergebnis in `C:\Users\<Name>\Publisher\Fertig\<Datum Titel>\`:
 - `Einzelclips\…`: jeder Moment einzeln (16:9)
 - `Hochformat\…`: dieselben Clips in 9:16 mit unscharfem Hintergrund für TikTok/Shorts
 - `Beschreibung.txt`: Titel, Kapitelmarken und Credits
+
+Oben rechts: **⟳ Update** mit der aktuellen Versionsnummer daneben.
+
+### Referenzvideos: aus fertigen Videos lernen
+1. **Referenzvideos → Videos:** fertige Videos ins Fenster ziehen oder „Dateien auswählen“ (mehrere gleichzeitig).
+   Sie werden in `C:\Users\<Name>\Publisher\Referenzvideos` kopiert und automatisch analysiert.
+2. **Bearbeiten:** Plattform, „Wie lief es?“ (gut / mittel / schlecht) und optional Views, Ø Wiedergabedauer,
+   Retention, Likes, Kommentare und Shares eintragen (Zahlen auch als „12.500“, „1,2k“, „3 Mio“).
+   Falsch erkannte Merkmale (Untertitel, Musik, Text im Hook, CTA, Hook-Zeit) lassen sich dort korrigieren.
+3. **Erfolgsprofil:** Ab je 2 gut und 2 schwach laufenden Videos zeigt das Tool, welche Merkmale die guten
+   Videos häufiger haben (Karten mit Balken: grün = gute, grau = schwache Videos) und was es empfiehlt.
+   Das Profil aktualisiert sich bei jeder Änderung.
+4. **Im Editor (Erstellen):** Die wichtigsten Empfehlungen stehen über dem Start-Button. Mit
+   „Erfolgsprofil beim Schnitt anwenden“ übernimmt der Generator sie, zum Beispiel mit Clips, die näher am Höhepunkt
+   starten, mit kürzeren Clips (mehr Schnitte) und mit der empfohlenen Länge. Nach dem Erstellen prüft das Tool das neue Video
+   gegen dein Profil („Check deines neuen Videos“).
+5. **Verwalten:** Ansehen, Bearbeiten, Neu analysieren, Löschen; „Für Lernen nutzen“ schließt ein Video aus.
+
+Analysiert werden Länge, Schnittfrequenz, Ø Einstellungslänge, Rhythmus, Bewegung/Tempo, Hook (erster starker
+Moment in den ersten 3 s), Hook-Energie, Text-Overlays, Untertitel, Musik- und Sprachanteil, Lautstärke,
+Intro-Länge, Position des Höhepunkts, Call-to-Action am Ende und das Format. Alles läuft lokal (ffmpeg + numpy),
+ohne Spracherkennung oder Texterkennung. Die Werte sind deshalb gute Schätzungen und keine exakten Messungen.
+
+### Update-Button
+- **⟳ Update** (oben rechts) prüft auf eine neue Version: „Du bist auf dem neuesten Stand“ oder
+  „Update verfügbar“ mit der Option, es direkt zu installieren (mit Fortschrittsanzeige).
+- Vorher wird gesichert: offene Bearbeitungsfenster werden gespeichert, die Eingaben auf „Erstellen“ werden
+  nach dem Neustart wiederhergestellt. Läuft gerade eine Erstellung, wird das Update erst danach installiert.
+  Bei einem laufenden Upload wartet das Update.
+- Nach dem Neustart kommt „Update installiert ✓“ oder eine verständliche Fehlermeldung.
 
 ### Wie die Highlights gefunden werden
 - **Lachen zuerst:** Lachen pulsiert rhythmisch („ha-ha-ha“, 3,5–7,5 Silben pro Sekunde im Sprachbereich).

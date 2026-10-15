@@ -15,7 +15,8 @@ dependencies = [
     "imageio-ffmpeg>=0.5",
     "tzdata; sys_platform == 'win32'",
     "customtkinter>=5.2",
-    "Pillow>=10",  # Windows hat keine eigene Zeitzonen-Datenbank
+    "Pillow>=10",
+    "tkinterdnd2>=0.4",  # Windows hat keine eigene Zeitzonen-Datenbank
 ]
 
 [project.optional-dependencies]
