@@ -68,6 +68,8 @@ class Settings:
         self.data.setdefault("dry_run", True)
         self.data.setdefault("notify_on_entry", True)
         self.data.setdefault("autostart", False)
+        self.data.setdefault("keep_display_on", True)
+        self.data.setdefault("entry_cooldown_sec", 300)
         self.save()
 
     def __getitem__(self, key):
@@ -205,6 +207,11 @@ class App(tk.Tk):
         st.configure("Card.TCheckbutton", background=CARD, foreground=FG)
         st.map("Card.TCheckbutton", background=[("active", CARD)])
         st.configure("TEntry", fieldbackground="#14141C", foreground=FG, insertcolor=FG)
+        st.configure("TCombobox", fieldbackground="#14141C", background=CARD, foreground=FG, arrowcolor=FG)
+        st.map("TCombobox", fieldbackground=[("readonly", "#14141C")], foreground=[("readonly", FG)],
+               selectbackground=[("readonly", "#14141C")], selectforeground=[("readonly", FG)])
+        self.option_add("*TCombobox*Listbox.background", "#14141C")
+        self.option_add("*TCombobox*Listbox.foreground", FG)
         st.configure("Status.TLabel", background=CARD, foreground=FG, font=("Segoe UI", 10, "bold"), padding=(12, 8))
         st.configure("Treeview", background="#14141C", fieldbackground="#14141C", foreground=FG, rowheight=24,
                      borderwidth=0)
@@ -294,6 +301,19 @@ class App(tk.Tk):
                         style="Card.TCheckbutton").pack(anchor="w")
         ttk.Checkbutton(op, text="Beim Öffnen automatisch starten", variable=self.auto_var,
                         style="Card.TCheckbutton").pack(anchor="w")
+        self.awake_var = tk.BooleanVar(value=bool(self.settings["keep_display_on"]))
+        ttk.Checkbutton(op, text="Auch bei gesperrtem PC (Win + L) weiterlaufen – Bildschirm bleibt dafür an",
+                        variable=self.awake_var,
+                        style="Card.TCheckbutton").pack(anchor="w")
+        crow = ttk.Frame(op, style="Card.TFrame")
+        crow.pack(anchor="w", pady=(4, 0))
+        ttk.Label(crow, text="Pause zwischen zwei Einträgen im selben Kanal:", style="Card.TLabel").pack(side="left")
+        self.cooldown_choices = {"2 Minuten": 120, "5 Minuten": 300, "10 Minuten": 600}
+        current = next((k for k, v in self.cooldown_choices.items() if v == self.settings["entry_cooldown_sec"]),
+                       "5 Minuten")
+        self.cooldown_var = tk.StringVar(value=current)
+        ttk.Combobox(crow, textvariable=self.cooldown_var, values=list(self.cooldown_choices), width=11,
+                     state="readonly").pack(side="left", padx=6)
         srow = ttk.Frame(op, style="Card.TFrame")
         srow.pack(anchor="w", pady=(8, 0))
         self.start_btn = ttk.Button(srow, text="▶  Start", style="Accent.TButton", command=self.start)
@@ -568,6 +588,8 @@ class App(tk.Tk):
         self.settings["dry_run"] = self.dry_var.get()
         self.settings["notify_on_entry"] = self.entry_push_var.get()
         self.settings["autostart"] = self.auto_var.get()
+        self.settings["keep_display_on"] = self.awake_var.get()
+        self.settings["entry_cooldown_sec"] = self.cooldown_choices.get(self.cooldown_var.get(), 300)
         if not BUILTIN_CLIENT_ID:
             self.settings["client_id"] = self.client_var.get().strip()
         self.settings.save()

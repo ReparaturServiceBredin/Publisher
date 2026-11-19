@@ -89,6 +89,9 @@ DEFAULTS = {
     "entry_cooldown_sec": 600,
     "burst_min_users": 15,
     "burst_window_sec": 30,
+    # Gesprochene Giveaways („schreibt 100 rein“): so viele verschiedene Leute müssen dasselbe NEUE Wort schreiben
+    "word_burst_min_users": 25,
+    "keep_display_on": True,
     "giveaway_bots": ["fossabot", "nightbot", "streamelements", "streamlabs", "moobot", "wizebot", "sery_bot"],
     "blocked_commands": [
         "!discord", "!insta", "!instagram", "!youtube", "!yt", "!tiktok", "!twitter", "!socials", "!social",
@@ -285,17 +288,56 @@ class TokenManager:
         return True
 
 
-def keep_awake(on: bool) -> None:
-    """Windows: PC nicht in den Standby gehen lassen, solange der Bot läuft (Bildschirm darf ausgehen)."""
+_power_request = None
+
+
+def keep_awake(on: bool, display: bool = True) -> None:
+    """Windows: PC wach halten, solange der Bot läuft – auch bei gesperrtem PC (Win + L).
+
+    * SetThreadExecutionState: kein automatischer Standby.
+    * PowerSetRequest (System + Execution): Windows soll den Prozess nicht einfrieren.
+    * display=True: Bildschirm bleibt an. Viele Laptops/neuere PCs („Modern Standby“) schlafen sonst ein,
+      sobald der Bildschirm nach dem Sperren ausgeht – dann wäre der Bot blind.
+    """
+    global _power_request
     if sys.platform != "win32":
         return
     try:
         import ctypes
+        from ctypes import wintypes
 
-        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
-        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+        k32 = ctypes.windll.kernel32
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED = 0x80000000, 0x00000001, 0x00000002
+        flags = ES_CONTINUOUS
         if on:
-            log.info("Standby ist deaktiviert, solange der Bot läuft (Bildschirm darf ausgehen).")
+            flags |= ES_SYSTEM_REQUIRED | (ES_DISPLAY_REQUIRED if display else 0)
+        k32.SetThreadExecutionState(flags)
+
+        class REASON_CONTEXT(ctypes.Structure):
+            _fields_ = [("Version", wintypes.ULONG), ("Flags", wintypes.DWORD), ("SimpleReasonString", wintypes.LPWSTR)]
+
+        k32.PowerCreateRequest.restype = wintypes.HANDLE
+        k32.PowerCreateRequest.argtypes = [ctypes.POINTER(REASON_CONTEXT)]
+        k32.PowerSetRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+        k32.PowerClearRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+        requests = [1, 3] + ([0] if display else [])  # SystemRequired, ExecutionRequired, DisplayRequired
+        if on and _power_request is None:
+            ctx = REASON_CONTEXT(0, 0x1, "Twitch Giveaway Bot liest den Chat mit")
+            handle = k32.PowerCreateRequest(ctypes.byref(ctx))
+            if handle and handle != wintypes.HANDLE(-1).value:
+                for r in requests:
+                    k32.PowerSetRequest(handle, r)
+                _power_request = (handle, requests)
+        elif not on and _power_request is not None:
+            handle, reqs = _power_request
+            for r in reqs:
+                k32.PowerClearRequest(handle, r)
+            k32.CloseHandle(handle)
+            _power_request = None
+        if on:
+            log.info("PC bleibt wach, solange der Bot läuft%s.",
+                     " – auch gesperrt mit Win + L (Bildschirm bleibt dafür an, zeigt nur den Sperrbildschirm)"
+                     if display else " (Bildschirm darf ausgehen; manche PCs schlafen dann trotzdem ein)")
     except Exception as exc:  # noqa: BLE001
         log.warning("Standby konnte nicht verhindert werden: %s", exc)
 
@@ -460,7 +502,20 @@ KEYWORD_RE = re.compile(
 )
 KEYWORD_STOPWORDS = {"in", "im", "den", "the", "a", "an", "to", "ein", "eine", "einfach", "jetzt", "mal", "now",
                      "into", "chat", "hier", "folgendes", "das", "dies", "this", "und", "and", "es", "it"}
-HINT_WINDOW_SEC = 600  # so lange nach einem Giveaway-Hinweis zählen auch Wort-Bursts ohne „!“
+HINT_WINDOW_SEC = 600
+NOVELTY_WINDOW_SEC = 600
+WARMUP_SEC = 120  # war das Wort in den 10 Minuten davor schon häufig, ist es Emote/Meme, kein Giveaway
+# Häufige Emotes (Twitch, BTTV, 7TV, FFZ) und Chat-Floskeln, die nie als Giveaway-Wort gelten
+COMMON_SPAM = {w.lower() for w in """
+KEKW OMEGALUL LUL LULW Pog PogU PogChamp POGGERS POGGIES monkaS monkaW monkaHmm Sadge PepeHands PepeLaugh pepeLaugh
+catJAM EZ Clap W L LETSGO LETSGOO LETSGOOO xdd xd XD ICANT Aware Okayge peepoHappy widepeepoHappy Kappa BibleThump
+NotLikeThis 4Head Jebaited HeyGuys ResidentSleeper Kreygasm gachiGASM Copium Hopium Stare Erm Clueless Bedge peepoClap
+FeelsBadMan FeelsGoodMan FeelsStrongMan OMEGADANCE GIGACHAD Chatting Wokege Deadge Susge NOWAYING BASED HUH Kekw kekw
+GG gg F o7 lol lmao haha hahaha jaja ja nein yes no ok okay hi hallo moin servus hey wtf omg rip LOL LMAO LULE Kekl
+monkaGIGA PauseChamp WAYTOODANK DinkDonk modCheck Pepega PepegaAim forsenE KomodoHype SeemsGood VoHiYo CoolStoryBob
+TriHard cmonBruh DansGame SwiftRage WutFace BabyRage FailFish Kappa123 KappaPride TwitchUnity HSWP PJSalt NODDERS
+NOPERS peepoSad peepoLeave peepoArrive catKISS Love love herz Hype hype zzz uff oha wow krass geil digga bruder
+""".split()}  # so lange nach einem Giveaway-Hinweis zählen auch Wort-Bursts ohne „!“
 
 
 def parse_irc(line: str) -> Optional[dict]:
@@ -499,7 +554,10 @@ class Detector:
         self.me_re = re.compile(rf"(?<![\w@])@?{re.escape(self.me)}(?!\w)", re.IGNORECASE)
         self.burst: Dict[Tuple[str, str], Deque[Tuple[float, str]]] = defaultdict(deque)
         self.last_entry: Dict[str, float] = {}
-        self.hint: Dict[str, float] = {}  # Kanal → Zeitpunkt der letzten Giveaway-Ansage von Bot/Mod/Streamer
+        self.hint: Dict[str, float] = {}
+        self.first_seen: Dict[str, float] = {}
+        self.word_fired: Dict[Tuple[str, str], float] = {}
+        self._last_sweep = 0.0  # Kanal → Zeitpunkt der letzten Giveaway-Ansage von Bot/Mod/Streamer
         self.on_skip = lambda channel, command, reason: None
         self.on_hint = lambda channel, sender, text: None
 
@@ -509,6 +567,65 @@ class Detector:
             if cmd not in self.cfg["blocked_commands"]:
                 return cmd
         return None
+
+    def _word_burst(self, channel: str, word: str, sender: str, now: float) -> Optional[Tuple[str, str]]:
+        """Viele verschiedene Leute schreiben plötzlich dasselbe Wort.
+
+        Nach einer Giveaway-Ansage (Bot/Mod/Streamer oder mehrere Zuschauer schreiben „giveaway“) reichen
+        burst_min_users. Ohne Ansage (gesprochenes Giveaway: „schreibt 100 rein“) braucht es word_burst_min_users
+        UND das Wort muss neu sein: vorher selten (im Schnitt der 10 Minuten davor weniger als ein Drittel davon
+        pro 30 s) und jetzt mindestens 4× so häufig. Dauer-Emotes und Running Gags fallen so heraus. Nach dem Verbinden wird erst 2 Minuten
+        mitgelesen, damit es eine Vergleichsbasis gibt."""
+        self.first_seen.setdefault(channel, now)
+        key = (channel, "word:" + word.lower())
+        q = self.burst[key]
+        q.append((now, sender))
+        window = self.cfg["burst_window_sec"]
+        while q and now - q[0][0] > NOVELTY_WINDOW_SEC + window:
+            q.popleft()
+        self._maybe_sweep(now)
+        if now - self.word_fired.get(key, -1e9) < NOVELTY_WINDOW_SEC:
+            return None  # dieses Wort hat hier gerade schon ausgelöst
+        recent = {u for t, u in q if now - t <= window}
+        hinted = now - self.hint.get(channel, -1e9) <= HINT_WINDOW_SEC
+        if hinted and len(recent) >= self.cfg["burst_min_users"]:
+            self.word_fired[key] = now
+            return word, f"{len(recent)} Nutzer schrieben „{word}“ kurz nach einer Giveaway-Ansage"
+        need = self.cfg["word_burst_min_users"]
+        if len(recent) < need:
+            return None
+        observed = min(NOVELTY_WINDOW_SEC, now - window - self.first_seen[channel])
+        if observed < WARMUP_SEC:
+            return None  # noch keine Vergleichsbasis (gerade erst verbunden)
+        before = sum(1 for t, _ in q if now - t > window)
+        baseline = before * window / observed  # so oft kam das Wort früher pro 30 s
+        # Giveaway-Wörter („100“, „GTA6“) waren vorher selten – Running Gags („Monte“) sind ständig da
+        if baseline < need / 3 and len(recent) >= 4 * baseline:
+            self.word_fired[key] = now
+            return word, f"{len(recent)} Nutzer schrieben plötzlich „{word}“ (Aufruf im Stream?)"
+        return None
+
+    def _viewer_hint(self, channel: str, sender: str, now: float) -> None:
+        """Schreiben mehrere Zuschauer „giveaway/gewinnspiel“, gilt das als Hinweis (Ansage war wohl gesprochen)."""
+        q = self.burst[(channel, "hint")]
+        q.append((now, sender))
+        while q and now - q[0][0] > 60:
+            q.popleft()
+        if len({u for _, u in q}) >= 3 and now - self.hint.get(channel, -1e9) > 60:
+            self.hint[channel] = now
+            log.info("💬 Mehrere Zuschauer in #%s schreiben über ein Giveaway – achte jetzt auch auf Wort-Aufrufe.",
+                     channel)
+
+    def _maybe_sweep(self, now: float) -> None:
+        """Speicher klein halten: alte Wort-Zähler regelmäßig entfernen (große Chats schreiben sehr viel)."""
+        if now - self._last_sweep < 60:
+            return
+        self._last_sweep = now
+        limit = NOVELTY_WINDOW_SEC + self.cfg["burst_window_sec"]
+        for key in [k for k, q in self.burst.items() if not q or now - q[-1][0] > limit]:
+            del self.burst[key]
+        for key in [k for k, t in self.word_fired.items() if now - t > limit]:
+            del self.word_fired[key]
 
     def keyword(self, text: str) -> Optional[str]:
         for m in KEYWORD_RE.finditer(text):
@@ -521,7 +638,7 @@ class Detector:
         return None
 
     def check_giveaway(self, channel: str, sender: str, text: str, now: Optional[float] = None,
-                       privileged: bool = False) -> Optional[Tuple[str, str]]:
+                       privileged: bool = False, has_emotes: bool = False) -> Optional[Tuple[str, str]]:
         """Gibt (Befehl, Grund) zurück, wenn ein Eintrag fällig ist – sonst None.
 
         privileged = Nachricht vom Streamer oder einem Mod (aus den Twitch-Badges)."""
@@ -529,6 +646,7 @@ class Detector:
         if sender == self.me:
             return None
         lower = text.lower()
+        self.first_seen.setdefault(channel, now)
         found: Optional[Tuple[str, str]] = None
         # 1) Giveaway-Bot, Streamer oder Mod kündigt an
         if (sender in self.cfg["giveaway_bots"] or privileged) and any(w in lower for w in GIVEAWAY_WORDS):
@@ -552,19 +670,14 @@ class Detector:
                 if len(users) >= self.cfg["burst_min_users"] and found is None:
                     found = (cmd, f"{len(users)} Nutzer schrieben {cmd} in {window:.0f} s")
                     q.clear()
-        # 3) Wort-Giveaway ohne „!“: nur kurz nach einer Giveaway-Ansage, sonst wäre Emote-Spam ein „Giveaway“
-        elif (now - self.hint.get(channel, -1e9) <= HINT_WINDOW_SEC and SINGLE_WORD_RE.match(stripped)
-              and not stripped.startswith("!")):
-            word = stripped
-            q = self.burst[(channel, "word:" + word.lower())]
-            q.append((now, sender))
-            window = self.cfg["burst_window_sec"]
-            while q and now - q[0][0] > window:
-                q.popleft()
-            users = {u for _, u in q}
-            if len(users) >= self.cfg["burst_min_users"] and found is None:
-                found = (word, f"{len(users)} Nutzer schrieben „{word}“ kurz nach einer Giveaway-Ansage")
-                q.clear()
+        # 3) Wort-Giveaway ohne „!“ – z. B. gesprochen: „schreibt 100 rein“, „PS5“, „GTA6“
+        elif (SINGLE_WORD_RE.match(stripped) and not stripped.startswith("!") and not has_emotes
+              and stripped.lower() not in COMMON_SPAM and stripped.lower() not in self.cfg["blocked_commands"]):
+            word_hit = self._word_burst(channel, stripped, sender, now)
+            if word_hit and found is None:
+                found = word_hit
+        if any(w in lower for w in GIVEAWAY_WORDS) and not privileged and sender not in self.cfg["giveaway_bots"]:
+            self._viewer_hint(channel, sender, now)
         if found is None:
             return None
         if not self.cooldown_ok(channel, now):
@@ -732,18 +845,19 @@ class ChatBot:
             badges = msg["tags"].get("badges", "")
             privileged = "broadcaster/" in badges or "moderator/" in badges or msg["tags"].get("mod") == "1" \
                 or sender == channel
-            await self._on_message(channel, sender, msg["tags"].get("display-name") or sender, msg["text"], privileged)
+            await self._on_message(channel, sender, msg["tags"].get("display-name") or sender, msg["text"], privileged,
+                                   bool(msg["tags"].get("emotes")))
 
     async def _heartbeat(self) -> None:
-        """Alle 10 Minuten ein Lebenszeichen ins Protokoll – so sieht man, dass der Bot wirklich mitliest."""
+        """Alle 10 Minuten eine Statuszeile ins Protokoll (automatisch) – so sieht man, dass der Bot mitliest."""
         while True:
             await asyncio.sleep(HEARTBEAT_SEC)
             counts, self.msg_counts = self.msg_counts, {}
             if not self.joined:
-                log.warning("Lebenszeichen: in keinem Kanal – Verbindung wird wiederhergestellt …")
+                log.warning("Status: in keinem Kanal – Verbindung wird wiederhergestellt …")
                 continue
             parts = [f"#{c}: {counts.get(c, 0):,} Nachrichten".replace(",", ".") for c in sorted(self.joined)]
-            log.info("Läuft ✔ – letzte %d Min: %s", HEARTBEAT_SEC // 60, ", ".join(parts))
+            log.info("Status: läuft ✔ – gelesen in den letzten %d Min: %s", HEARTBEAT_SEC // 60, ", ".join(parts))
 
     async def _check_joined(self, batch: list) -> None:
         """Twitch ignoriert unbekannte Kanäle stillschweigend – nach 15 s melden, was nicht geklappt hat."""
@@ -764,7 +878,8 @@ class ChatBot:
             if i + JOIN_BATCH_SIZE < len(channels):
                 await asyncio.sleep(JOIN_BATCH_INTERVAL_SEC)
 
-    async def _on_message(self, channel: str, sender: str, display: str, text: str, privileged: bool = False) -> None:
+    async def _on_message(self, channel: str, sender: str, display: str, text: str, privileged: bool = False,
+                          has_emotes: bool = False) -> None:
         self.emit("message", channel=channel)
         self.msg_counts[channel] = self.msg_counts.get(channel, 0) + 1
         if self.detector.is_entry_confirmation(sender, text):
@@ -778,7 +893,7 @@ class ChatBot:
                 f"Kanal: {channel}\nVon: {display}\nNachricht: {text}\nhttps://twitch.tv/{channel}",
                 urgent=True, click=f"https://twitch.tv/{channel}",
             ))
-        hit = self.detector.check_giveaway(channel, sender, text, privileged=privileged)
+        hit = self.detector.check_giveaway(channel, sender, text, privileged=privileged, has_emotes=has_emotes)
         if hit:
             command, reason = hit
             log.info("Giveaway in #%s erkannt (%s) → Eintrag mit %s geplant.", channel, reason, command)
@@ -1017,7 +1132,7 @@ async def run_bot(cfg: dict, stop: Optional[asyncio.Event] = None, on_token_upda
     whispers = WhisperListener(cfg, api, notifier, stop, tokens, emit=on_event)
     tasks = [asyncio.ensure_future(chat.run()), asyncio.ensure_future(whispers.run()),
              asyncio.ensure_future(token_watch(api, tokens, notifier, stop)), asyncio.ensure_future(sleep_watch(stop))]
-    keep_awake(True)
+    keep_awake(True, bool(cfg.get("keep_display_on", True)))
     exit_code = 0
     try:
         pending = set(tasks)
