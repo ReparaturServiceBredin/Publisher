@@ -11,7 +11,23 @@ trägt dich **einmal** ein und schickt dir eine **Push-Nachricht aufs Handy**, w
 
 ---
 
-## 1. Python und websockets installieren
+## 0. Einfachster Weg: GiveawayBot.exe (Windows, ohne Python)
+
+1. **[GiveawayBot.zip herunterladen](https://github.com/ReparaturServiceBredin/Publisher/releases/download/giveaway-bot/GiveawayBot.zip)**
+   (oder nur die [GiveawayBot.exe](https://github.com/ReparaturServiceBredin/Publisher/releases/download/giveaway-bot/GiveawayBot.exe)).
+2. Einen eigenen Ordner anlegen, z. B. `C:\GiveawayBot`, und den Inhalt dort hinein entpacken.
+3. `GiveawayBot.exe` doppelklicken. Windows warnt evtl. („Der Computer wurde durch Windows geschützt“):
+   *Weitere Informationen → Trotzdem ausführen*.
+4. Beim ersten Start legt der Bot neben der exe eine **`config.json`** an und schließt sich nach Enter.
+   Diese Datei mit dem Editor öffnen (Rechtsklick → Öffnen mit → Editor) und wie in **Schritt 2–5** beschrieben
+   ausfüllen. Schritt 1 (Python) brauchst du mit der exe **nicht**.
+5. `GiveawayBot.exe` erneut starten. Das schwarze Fenster zeigt alles, was passiert. Zum Beenden das Fenster
+   schließen oder **Strg + C** drücken.
+
+Die exe aktualisiert sich **nicht** selbst. Für eine neue Version lädst du sie über den Link oben neu herunter
+und ersetzt die alte. Deine `config.json` bleibt dabei erhalten.
+
+## 1. Python und websockets installieren (nur ohne exe nötig)
 
 1. Python 3.9 oder neuer installieren: <https://www.python.org/downloads/>.
    Unter Windows beim Installieren **„Add Python to PATH“** anhaken.
@@ -89,7 +105,7 @@ Webhooks einen Webhook erstellen und die URL bei `discord_webhook` eintragen. Be
 
 ## 6. Erst testen (dry_run), dann scharf schalten
 
-1. Mit `"dry_run": true` starten:
+1. Mit `"dry_run": true` starten: `GiveawayBot.exe` doppelklicken oder, mit Python,
 
    ```
    python giveaway_bot.py

@@ -1,0 +1,71 @@
+name: GiveawayBot.exe bauen
+
+# Baut den Twitch-Giveaway-Bot als Windows-.exe und legt sie im Release „giveaway-bot“ ab
+# (feste Download-Adresse). Das Release wird bewusst NICHT als „latest“ markiert,
+# damit das Auto-Update der Publisher.exe davon unberührt bleibt.
+on:
+  push:
+    branches: [main, master, "claude/**"]
+    paths: ["twitch_giveaway_bot/**", ".github/workflows/build-giveaway-bot.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-giveaway-bot
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: twitch_giveaway_bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhängigkeiten
+        run: pip install websockets pyinstaller
+
+      - name: Skript prüfen
+        run: |
+          python -m py_compile giveaway_bot.py
+          python giveaway_bot.py --selftest
+
+      - name: EXE bauen
+        run: pyinstaller --noconfirm --clean --onefile --console --name GiveawayBot --collect-submodules websockets giveaway_bot.py
+
+      - name: Selbsttest der fertigen EXE
+        run: dist\GiveawayBot.exe --selftest
+
+      - name: Paket zusammenstellen
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force paket | Out-Null
+          Copy-Item dist\GiveawayBot.exe, config.example.json, ANLEITUNG.md paket\
+          Compress-Archive -Path paket\* -DestinationPath GiveawayBot.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GiveawayBot
+          path: |
+            twitch_giveaway_bot/dist/GiveawayBot.exe
+            twitch_giveaway_bot/GiveawayBot.zip
+
+      - name: Release „giveaway-bot“ aktualisieren
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="Twitch-Giveaway-Bot für Windows, gebaut aus ${GITHUB_SHA::7} (Lauf ${{ github.run_number }}). GiveawayBot.zip enthält die exe, die Beispielkonfiguration und die Anleitung."
+          if gh release view giveaway-bot >/dev/null 2>&1; then
+            gh release upload giveaway-bot dist/GiveawayBot.exe GiveawayBot.zip config.example.json ANLEITUNG.md --clobber
+            gh release edit giveaway-bot --notes "$NOTES" --latest=false
+          else
+            gh release create giveaway-bot dist/GiveawayBot.exe GiveawayBot.zip config.example.json ANLEITUNG.md \
+              --title "Twitch-Giveaway-Bot (Windows)" --notes "$NOTES" --target "$GITHUB_SHA" --latest=false
+          fi

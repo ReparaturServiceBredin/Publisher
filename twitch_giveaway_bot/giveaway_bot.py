@@ -126,6 +126,13 @@ def load_config(path: Path) -> dict:
         cfg[key] = float(cfg[key])
     cfg["burst_min_users"] = int(cfg["burst_min_users"])
 
+    placeholders = {"dein_twitch_name", "hier_deine_client_id", "hier_dein_access_token",
+                    "geheimer-name-nur-fuer-dich-8f3k2"}
+    unfilled = [k for k in ("username", "client_id", "access_token", "ntfy_topic") if str(cfg[k]) in placeholders]
+    unfilled += ["channels"] if cfg["channels"] == ["kanal1", "kanal2"] else []  # unveränderte Vorlage
+    if unfilled:
+        raise FatalError(f"config.json ist noch nicht ausgefüllt (Beispielwerte bei: {', '.join(unfilled)}). "
+                         "Bitte eigene Daten eintragen – siehe ANLEITUNG.md.")
     missing = [k for k in ("username", "client_id", "access_token") if not cfg[k]]
     if missing:
         raise FatalError(f"In config.json fehlt: {', '.join(missing)}")
@@ -645,17 +652,89 @@ async def main_async(config_path: Path) -> int:
     return exit_code
 
 
+def is_frozen() -> bool:
+    """Läuft als Windows-.exe (PyInstaller)?"""
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_dir() -> Path:
+    # In der .exe liegt __file__ in einem temporären Ordner – config.json gehört neben die .exe
+    return Path(sys.executable).resolve().parent if is_frozen() else Path(__file__).resolve().parent
+
+
+def example_config() -> dict:
+    cfg = {
+        "username": "dein_twitch_name",
+        "client_id": "hier_deine_client_id",
+        "access_token": "hier_dein_access_token",
+        "channels": ["kanal1", "kanal2"],
+        "ntfy_topic": "geheimer-name-nur-fuer-dich-8f3k2",
+    }
+    cfg.update({k: v for k, v in DEFAULTS.items() if k not in cfg and k not in ("channels",)})
+    return cfg
+
+
+def create_config_if_missing(path: Path) -> bool:
+    """Beim ersten Start der .exe eine config.json zum Ausfüllen anlegen. True = neu angelegt."""
+    if path.exists():
+        return False
+    path.write_text(json.dumps(example_config(), ensure_ascii=False, indent=2), encoding="utf-8")
+    log.info("Neue Konfigurationsdatei angelegt: %s", path)
+    log.info("Bitte mit einem Texteditor öffnen, deine Daten eintragen (siehe ANLEITUNG.md) und den Bot neu starten.")
+    return True
+
+
+def selftest() -> int:
+    """Prüft ohne Netzwerk, ob die .exe vollständig ist (wird beim Bauen auf GitHub ausgeführt)."""
+    import ssl
+    import tempfile
+
+    ssl.create_default_context()
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "config.json"
+        assert create_config_if_missing(p)
+        try:
+            load_config(p)
+            raise AssertionError("Beispielwerte wurden nicht erkannt")
+        except FatalError:
+            pass  # richtig: unausgefüllte Vorlage wird abgelehnt
+        data = json.loads(p.read_text(encoding="utf-8"))
+        data.update(username="testnutzer", client_id="cid", access_token="tok", channels=["testkanal"], ntfy_topic="t")
+        p.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_config(p)
+    det = Detector(cfg)
+    hit = det.check_giveaway("kanal", "streamelements", "GIVEAWAY! !discord dann !join", now=1.0)
+    assert hit and hit[0] == "!join", hit
+    assert det.is_win("nightbot", f"Glückwunsch @{cfg['username']}, du hast gewonnen")
+    assert parse_irc(":a!a@a.tmi.twitch.tv PRIVMSG #k :hi")["text"] == "hi"
+    print(f"OK websockets={websockets.__version__}")
+    return 0
+
+
 def main() -> None:
     setup_logging()
     if sys.version_info < (3, 9):
         log.error("Bitte Python 3.9 oder neuer verwenden.")
         sys.exit(1)
-    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("config.json")
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    config_path = Path(args[0]) if args else app_dir() / "config.json"
+    code = 0
     try:
-        code = asyncio.run(main_async(config_path))
+        if is_frozen() and create_config_if_missing(config_path):
+            code = 1
+        else:
+            code = asyncio.run(main_async(config_path))
     except KeyboardInterrupt:
         log.info("Bot beendet (Strg+C).")
         code = 0
+    if is_frozen():
+        # Bei Doppelklick schließt sich das Fenster sonst sofort – Meldungen sollen lesbar bleiben
+        try:
+            input("\nDrücke Enter zum Schließen …")
+        except (EOFError, KeyboardInterrupt):
+            pass
     sys.exit(code)
 
 
