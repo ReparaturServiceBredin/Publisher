@@ -5,6 +5,7 @@ name: Windows-EXE bauen
 on:
   push:
     branches: [main, master, "claude/**"]
+    paths-ignore: ["twitch_giveaway_bot/**"]  # der Bot ist kein Teil der Publisher.exe
   workflow_dispatch:
 
 permissions:

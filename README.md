@@ -94,6 +94,15 @@ ohne Spracherkennung oder Texterkennung. Die Werte sind deshalb gute Schätzunge
 
 ---
 
+## Twitch-Giveaway-Bot (eigenständiges Zusatzprogramm)
+
+Im Ordner [`twitch_giveaway_bot/`](twitch_giveaway_bot/) liegt ein separater Bot: Er liest mit deinem Account in
+ausgewählten Kanälen mit, trägt dich bei Chat-Giveaways einmal ein und schickt eine Push-Nachricht aufs Handy
+(ntfy, optional Discord), wenn du eine Flüsternachricht bekommst oder im Chat als Gewinner genannt wirst.
+Einrichtung Schritt für Schritt: [`twitch_giveaway_bot/ANLEITUNG.md`](twitch_giveaway_bot/ANLEITUNG.md).
+
+---
+
 ## Für Entwickler
 
 Macht Highlight-Videos und Shorts aus eigenen und fremden Twitch-/YouTube-VODs:

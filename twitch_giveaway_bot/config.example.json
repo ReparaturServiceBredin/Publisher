@@ -1,0 +1,24 @@
+{
+  "username": "dein_twitch_name",
+  "client_id": "hier_deine_client_id",
+  "access_token": "hier_dein_access_token",
+  "channels": [
+    "kanal1",
+    "kanal2"
+  ],
+  "ntfy_topic": "geheimer-name-nur-fuer-dich-8f3k2",
+  "discord_webhook": "",
+  "dry_run": true,
+  "notify_on_entry": true,
+  "entry_delay_sec": [3, 12],
+  "entry_cooldown_sec": 600,
+  "burst_min_users": 15,
+  "burst_window_sec": 30,
+  "giveaway_bots": ["fossabot", "nightbot", "streamelements", "streamlabs", "moobot", "wizebot", "sery_bot"],
+  "blocked_commands": [
+    "!discord", "!insta", "!instagram", "!youtube", "!yt", "!tiktok", "!twitter", "!socials", "!social",
+    "!uptime", "!followage", "!watchtime", "!points", "!song", "!songrequest", "!sr", "!setup", "!specs",
+    "!pc", "!code", "!prime", "!sub", "!subs", "!merch", "!commands", "!cmds", "!help", "!lurk", "!unlurk",
+    "!clip", "!so", "!shoutout", "!donate", "!tip", "!rules", "!schedule", "!emotes", "!hug", "!love"
+  ]
+}
