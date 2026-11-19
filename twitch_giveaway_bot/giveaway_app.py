@@ -27,6 +27,13 @@ try:
     from bot_identity import CLIENT_ID as BUILTIN_CLIENT_ID
 except ImportError:  # pragma: no cover
     BUILTIN_CLIENT_ID = ""
+try:
+    from bot_version import VERSION
+except ImportError:  # pragma: no cover
+    VERSION = "0.0.0"
+
+UPDATE_BASE = "https://github.com/ReparaturServiceBredin/Publisher/releases/download/giveaway-bot/"
+RESUME_FLAG = "--nach-update"
 
 APP_NAME = "Twitch Giveaway Bot"
 BG = "#0F0F14"
@@ -75,6 +82,66 @@ class Settings:
         tmp.replace(self.path)
 
 
+# ---------------------------------------------------------------- Selbst-Update
+
+def parse_version(text: str) -> tuple:
+    return tuple(int("".join(ch for ch in p if ch.isdigit()) or 0) for p in text.strip().lstrip("vV").split("."))
+
+
+def can_self_update() -> bool:
+    return bool(getattr(sys, "frozen", False)) and os.name == "nt"
+
+
+def check_update() -> str | None:
+    """Neuere Version auf GitHub? Gibt die Versionsnummer zurück oder None."""
+    req = bot.urllib.request.Request(UPDATE_BASE + "version.txt", headers={"User-Agent": bot.USER_AGENT})
+    with bot.urllib.request.urlopen(req, timeout=15) as resp:
+        latest = resp.read().decode("utf-8", "replace").strip()
+    return latest if latest and parse_version(latest) > parse_version(VERSION) else None
+
+
+def download_update(progress=None) -> Path:
+    exe = Path(sys.executable)
+    target = exe.with_name(exe.stem + ".new.exe")
+    req = bot.urllib.request.Request(UPDATE_BASE + "GiveawayBot.exe", headers={"User-Agent": bot.USER_AGENT})
+    with bot.urllib.request.urlopen(req, timeout=60) as resp, target.open("wb") as fh:
+        total = int(resp.headers.get("Content-Length", 0))
+        done = 0
+        while True:
+            chunk = resp.read(256 * 1024)
+            if not chunk:
+                break
+            fh.write(chunk)
+            done += len(chunk)
+            if progress and total:
+                progress(done / total)
+    if total and target.stat().st_size != total:
+        target.unlink(missing_ok=True)
+        raise RuntimeError("Download unvollständig – bitte erneut versuchen.")
+    return target
+
+
+def apply_update_and_restart(new_exe: Path, resume: bool) -> None:
+    """Kleines Skript ersetzt die .exe, sobald sie beendet ist, und startet sie neu."""
+    import subprocess
+    import tempfile
+
+    exe, pid = Path(sys.executable), os.getpid()
+    args = f" {RESUME_FLAG}" if resume else ""
+    script = Path(tempfile.gettempdir()) / f"giveawaybot_update_{pid}.cmd"
+    script.write_text(
+        "@echo off\r\n:wait\r\n"
+        f'tasklist /FI "PID eq {pid}" 2>nul | "%SystemRoot%\\System32\\find.exe" "{pid}" >nul && '
+        "(ping -n 2 127.0.0.1 >nul & goto wait)\r\n"
+        "set n=0\r\n:move\r\n"
+        f'move /y "{new_exe}" "{exe}" >nul 2>&1 && goto start\r\n'
+        "set /a n+=1\r\nif %n% GEQ 30 goto start\r\nping -n 2 127.0.0.1 >nul\r\ngoto move\r\n"
+        f':start\r\nstart "" "{exe}"{args}\r\ndel "%~f0"\r\n',
+        encoding="mbcs",
+    )
+    subprocess.Popen(["cmd", "/c", str(script)], creationflags=0x00000008 | 0x00000200, close_fds=True)
+
+
 class QueueLogHandler(logging.Handler):
     def __init__(self, q: queue.Queue):
         super().__init__()
@@ -108,8 +175,16 @@ class App(tk.Tk):
         self._refresh_account()
         self.after(100, self._poll)
         self.protocol("WM_DELETE_WINDOW", self._close)
-        if self.settings["autostart"] and self.settings["access_token"] and self.settings["channels"]:
+        self.bad_channels: list = []
+        resume = RESUME_FLAG in sys.argv and self.settings["resume_after_update"]
+        if resume:
+            self.settings["resume_after_update"] = False
+            self.settings.save()
+            self.after(300, lambda: self.write(f"Update auf Version {VERSION} installiert ✔"))
+        if (resume or self.settings["autostart"]) and self.settings["access_token"] and self.settings["channels"]:
             self.after(600, self.start)
+        if can_self_update():
+            self.after(1500, self._startup_update_check)
 
     # ------------------------------------------------------------ Aussehen
     def _style(self) -> None:
@@ -146,7 +221,13 @@ class App(tk.Tk):
         return outer
 
     def _build(self) -> None:
-        ttk.Label(self, text="🎁  " + APP_NAME, style="Title.TLabel").pack(anchor="w", padx=18, pady=(14, 4))
+        head = ttk.Frame(self)
+        head.pack(fill="x", padx=18, pady=(14, 4))
+        ttk.Label(head, text="🎁  " + APP_NAME, style="Title.TLabel").pack(side="left")
+        self.update_btn = ttk.Button(head, text="⟳  Update", style="Ghost.TButton", command=self.check_updates_clicked)
+        self.update_btn.pack(side="right")
+        self.version_label = ttk.Label(head, text=f"Version {VERSION}", foreground=MUTED, background=BG)
+        self.version_label.pack(side="right", padx=10)
         self.body = ttk.Frame(self, padding=(16, 0))
         self.body.pack(fill="both", expand=True)
 
@@ -288,6 +369,77 @@ class App(tk.Tk):
             pass
         self.after(120, self._poll)
 
+    # ------------------------------------------------------------ Updates
+    def _startup_update_check(self) -> None:
+        def job():
+            try:
+                latest = check_update()
+            except Exception as exc:  # noqa: BLE001 – Update-Probleme dürfen den Bot nie stören
+                bot.log.info("Update-Prüfung nicht möglich: %s", exc)
+                return
+            if latest:
+                self._later(lambda: self._offer_update(latest))
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def check_updates_clicked(self) -> None:
+        self.update_btn.configure(state="disabled", text="Suche …")
+
+        def job():
+            try:
+                latest = check_update()
+                self._later(lambda: self._checked(latest))
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                self._later(lambda: (self._reset_update_btn(),
+                                     messagebox.showerror(APP_NAME, f"Update-Prüfung fehlgeschlagen:\n{msg}")))
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _reset_update_btn(self) -> None:
+        self.update_btn.configure(state="normal", text="⟳  Update")
+
+    def _checked(self, latest) -> None:
+        self._reset_update_btn()
+        if latest:
+            self._offer_update(latest)
+        else:
+            messagebox.showinfo(APP_NAME, f"Du bist auf dem neuesten Stand (Version {VERSION}).")
+
+    def _offer_update(self, latest: str) -> None:
+        self.update_btn.configure(text=f"⬆  Update {latest}")
+        if not messagebox.askyesno(APP_NAME, f"Update verfügbar: Version {latest} (du hast {VERSION}).\n\n"
+                                             "Jetzt installieren? Der Bot startet danach von selbst neu"
+                                             + (" und läuft weiter." if self.bot_thread else ".")):
+            return
+        if not can_self_update():
+            webbrowser.open(UPDATE_BASE + "GiveawayBot.exe")
+            return
+        self._save_form()
+        resume = bool(self.bot_thread)
+        self.settings["resume_after_update"] = resume
+        self.settings.save()
+        self.update_btn.configure(state="disabled", text="Lade 0 %")
+        self.write(f"Lade Update {latest} …")
+
+        def job():
+            try:
+                path = download_update(lambda f: self._later(lambda: self.update_btn.configure(text=f"Lade {f:.0%}")))
+                self._later(lambda: self._install(path, resume))
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                self._later(lambda: (self._reset_update_btn(),
+                                     messagebox.showerror(APP_NAME, f"Update fehlgeschlagen:\n{msg}\n\n"
+                                                                    "Der Bot läuft unverändert weiter.")))
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _install(self, path: Path, resume: bool) -> None:
+        self.write("Installiere Update – der Bot startet gleich neu …")
+        self.stop()
+        apply_update_and_restart(path, resume)
+        self.after(1200, self.destroy)
+
     # ------------------------------------------------------------ Rückmeldungen vom Bot
     def _reset_stats(self) -> None:
         self.stat = {"chat": "–", "whispers": "–", "joined": set(), "messages": 0, "entries": 0, "accepted": 0}
@@ -347,6 +499,9 @@ class App(tk.Tk):
         elif kind == "joined":
             st["joined"].add(d["channel"])
             self._chan(d["channel"], status="betreten ✔")
+        elif kind == "join_failed":
+            self._chan(d["channel"], status="❌ nicht betreten – Name prüfen")
+            self.write(f"Kanal #{d['channel']} konnte nicht betreten werden – gibt es den Namen?", logging.WARNING)
         elif kind == "message":
             st["messages"] += 1
             c = d["channel"]
@@ -402,8 +557,12 @@ class App(tk.Tk):
         self.events.put(("call", fn))
 
     def _save_form(self) -> None:
-        names = [c.strip().lstrip("#").lower() for c in self.channels.get("1.0", "end").replace(",", "\n").split("\n")]
-        self.settings["channels"] = [c for c in dict.fromkeys(names) if c]
+        raw = self.channels.get("1.0", "end").replace(",", "\n").replace(" ", "\n").split("\n")
+        good, bad = bot.clean_channels(raw)
+        self.settings["channels"] = good
+        self.bad_channels = bad
+        self.channels.delete("1.0", "end")  # bereinigte Namen anzeigen (aus Links wird der Kanalname)
+        self.channels.insert("1.0", "\n".join(good + bad))
         self.settings["ntfy_topic"] = self.topic_var.get().strip()
         self.settings["discord_webhook"] = self.discord_var.get().strip()
         self.settings["dry_run"] = self.dry_var.get()
@@ -509,6 +668,11 @@ class App(tk.Tk):
         self._save_form()
         if not self.settings["access_token"]:
             messagebox.showinfo(APP_NAME, "Bitte zuerst mit Twitch anmelden.")
+            return
+        if self.bad_channels:
+            messagebox.showerror(APP_NAME, "Diese Einträge sind keine gültigen Twitch-Kanäle:\n\n"
+                                 + "\n".join(self.bad_channels)
+                                 + "\n\nBitte nur den Kanalnamen oder den Twitch-Link eintragen, z. B. montanablack88.")
             return
         if not self.settings["channels"]:
             messagebox.showinfo(APP_NAME, "Bitte mindestens einen Kanal eintragen.")

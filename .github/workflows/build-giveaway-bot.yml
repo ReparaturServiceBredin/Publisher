@@ -36,13 +36,21 @@ jobs:
         shell: bash
         run: printf 'CLIENT_ID = "%s"\n' "${{ vars.TWITCH_CLIENT_ID }}" > bot_identity.py
 
+      - name: Versionsnummer setzen
+        shell: bash
+        run: |
+          VERSION="1.1.${{ github.run_number }}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          printf 'VERSION = "%s"\n' "$VERSION" > bot_version.py
+          printf '%s' "$VERSION" > version.txt
+
       - name: Skript prüfen
         run: |
-          python -m py_compile giveaway_bot.py giveaway_app.py bot_identity.py
+          python -m py_compile giveaway_bot.py giveaway_app.py bot_identity.py bot_version.py
           python giveaway_bot.py --selftest
 
       - name: EXE bauen (Fenster-Version)
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name GiveawayBot --collect-submodules websockets --hidden-import bot_identity giveaway_app.py
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name GiveawayBot --collect-submodules websockets --hidden-import bot_identity --hidden-import bot_version giveaway_app.py
 
       - name: Selbsttest der fertigen EXE
         shell: pwsh
@@ -52,7 +60,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: GiveawayBot
+          name: GiveawayBot-${{ env.VERSION }}
           path: twitch_giveaway_bot/dist/GiveawayBot.exe
 
       - name: Release „giveaway-bot“ aktualisieren
@@ -60,12 +68,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          NOTES="Twitch-Giveaway-Bot für Windows: GiveawayBot.exe herunterladen, starten, „Mit Twitch anmelden“, Kanäle eintragen, Start. Gebaut aus ${GITHUB_SHA::7} (Lauf ${{ github.run_number }})."
+          NOTES="Twitch-Giveaway-Bot für Windows, Version $VERSION: GiveawayBot.exe herunterladen, starten, „Mit Twitch anmelden“, Kanäle eintragen, Start. Die exe aktualisiert sich danach selbst. Gebaut aus ${GITHUB_SHA::7}."
           if gh release view giveaway-bot >/dev/null 2>&1; then
             gh release upload giveaway-bot dist/GiveawayBot.exe --clobber
+            gh release upload giveaway-bot version.txt --clobber   # erst nach der exe – sonst lädt ein Client die alte
             for old in GiveawayBot.zip config.example.json ANLEITUNG.md; do gh release delete-asset giveaway-bot "$old" -y || true; done
             gh release edit giveaway-bot --notes "$NOTES" --latest=false
           else
-            gh release create giveaway-bot dist/GiveawayBot.exe \
+            gh release create giveaway-bot dist/GiveawayBot.exe version.txt \
               --title "Twitch-Giveaway-Bot (Windows)" --notes "$NOTES" --target "$GITHUB_SHA" --latest=false
           fi

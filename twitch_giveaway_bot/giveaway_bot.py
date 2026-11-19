@@ -48,6 +48,7 @@ RECONNECT_DELAY_SEC = 10
 EXIT_LOGIN = 2  # Beendet, weil die Twitch-Anmeldung abgelaufen ist (Fenster zeigt dann wieder „Anmelden“)
 JOIN_BATCH_SIZE = 20
 JOIN_BATCH_INTERVAL_SEC = 10
+JOIN_CHECK_SEC = 15  # so lange auf Twitchs JOIN-Bestätigung warten
 USER_AGENT = "TwitchGiveawayBot/1.0 (+python-urllib)"
 
 ENTRY_CONFIRM_WORDS = ("entered", "joined", "eingetragen", "teilgenommen", "dabei", "ticket", "entry", "registriert")
@@ -142,7 +143,10 @@ def normalize_config(raw: dict) -> dict:
     token = str(cfg["access_token"]).strip()
     cfg["access_token"] = token[6:] if token.lower().startswith("oauth:") else token
     cfg["client_id"] = str(cfg["client_id"]).strip()
-    cfg["channels"] = list(dict.fromkeys(str(c).strip().lstrip("#").lower() for c in cfg["channels"] if str(c).strip()))
+    cfg["channels"], bad_channels = clean_channels(cfg["channels"])
+    if bad_channels:
+        raise FatalError("Ungültige Kanalnamen: " + ", ".join(bad_channels)
+                         + " – bitte nur den Namen eintragen, z. B. montanablack88.")
     cfg["giveaway_bots"] = {str(b).strip().lower() for b in cfg["giveaway_bots"]}
     cfg["blocked_commands"] = {
         ("!" + str(c).strip().lower().lstrip("!")) for c in cfg["blocked_commands"] if str(c).strip()
@@ -368,6 +372,35 @@ class TwitchApi:
 
 # ====================================================================== IRC-Hilfen
 
+CHANNEL_NAME_RE = re.compile(r"^[a-z0-9_]{3,25}$")
+CHANNEL_URL_RE = re.compile(r"twitch\.tv/(?:popout/)?([A-Za-z0-9_]{3,25})", re.IGNORECASE)
+
+
+def clean_channel(raw: str) -> Optional[str]:
+    """„https://www.twitch.tv/MontanaBlack88“, „@name“, „#name“ → „montanablack88“. Ungültig → None."""
+    text = str(raw).strip()
+    m = CHANNEL_URL_RE.search(text)
+    if m:
+        text = m.group(1)
+    text = text.strip().strip("/").lstrip("@#").lower()
+    return text if CHANNEL_NAME_RE.match(text) else None
+
+
+def clean_channels(raws) -> Tuple[list, list]:
+    """(gültige Kanalnamen ohne Doppelte, ungültige Eingaben)."""
+    good, bad = [], []
+    for raw in raws:
+        if not str(raw).strip():
+            continue
+        name = clean_channel(raw)
+        if name:
+            if name not in good:
+                good.append(name)
+        else:
+            bad.append(str(raw).strip())
+    return good, bad
+
+
 IRC_LINE = re.compile(r"^(?:@(?P<tags>\S+) )?(?::(?P<prefix>\S+) )?(?P<command>\S+)(?P<params>.*)$")
 COMMAND_RE = re.compile(r"(?<!\S)(![A-Za-z0-9_]+)")
 SINGLE_COMMAND_RE = re.compile(r"^![A-Za-z0-9_]+$")
@@ -484,7 +517,8 @@ class ChatBot:
         self.tokens = tokens or TokenManager(cfg)
         self.emit = emit or _no_event  # Rückmeldungen fürs Fenster (Status, Einträge, Kanäle)
         self.entry_seq = 0
-        self.awaiting: Dict[str, int] = {}  # Kanal → Eintrags-Nr., auf deren Bestätigung durch Twitch gewartet wird
+        self.awaiting: Dict[str, int] = {}
+        self.joined: Set[str] = set()  # Kanal → Eintrags-Nr., auf deren Bestätigung durch Twitch gewartet wird
         self.notifier = notifier
         self.stop = stop
         self.detector = Detector(cfg)
@@ -516,6 +550,7 @@ class ChatBot:
                 log.exception("Unerwarteter Fehler in der Chat-Verbindung: %s", exc)
             finally:
                 self.ws = None
+                self.joined.clear()
                 self.emit("chat", state="getrennt")
                 if self.join_task:
                     self.join_task.cancel()
@@ -588,11 +623,20 @@ class ChatBot:
         elif cmd == "JOIN" and msg["nick"] == self.cfg["username"]:
             channel = msg["params"][0].lstrip("#").lower() if msg["params"] else "?"
             log.info("Kanal #%s betreten.", channel)
+            self.joined.add(channel)
             self.emit("joined", channel=channel)
         elif cmd == "PRIVMSG" and msg["params"] and msg["text"] is not None:
             channel = msg["params"][0].lstrip("#").lower()
             sender = (msg["tags"].get("login") or msg["nick"] or "").lower()
             await self._on_message(channel, sender, msg["tags"].get("display-name") or sender, msg["text"])
+
+    async def _check_joined(self, batch: list) -> None:
+        """Twitch ignoriert unbekannte Kanäle stillschweigend – nach 15 s melden, was nicht geklappt hat."""
+        await asyncio.sleep(JOIN_CHECK_SEC)
+        for channel in batch:
+            if channel not in self.joined:
+                log.warning("Kanal #%s konnte nicht betreten werden – Name richtig geschrieben?", channel)
+                self.emit("join_failed", channel=channel)
 
     async def _join_channels(self) -> None:
         """Höchstens 20 Kanäle pro 10 Sekunden (Twitch-Limit) – läuft im Hintergrund."""
@@ -601,6 +645,7 @@ class ChatBot:
             batch = channels[i:i + JOIN_BATCH_SIZE]
             await self.send_raw("JOIN " + ",".join(f"#{c}" for c in batch))
             log.info("Betrete %d Kanal/Kanäle: %s", len(batch), ", ".join(batch))
+            self._spawn(self._check_joined(batch))
             if i + JOIN_BATCH_SIZE < len(channels):
                 await asyncio.sleep(JOIN_BATCH_INTERVAL_SEC)
 
