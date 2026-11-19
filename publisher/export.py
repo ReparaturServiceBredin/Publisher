@@ -107,7 +107,7 @@ def render_clips(
         script = render.transition_filter(durations, fade, settings["video"]["fps"])
         (out_dir / "transitions.txt").write_text(script, encoding="utf-8")
         files = [f"clip_{i:02d}.mp4" for i in range(1, len(clips) + 1)]
-        render.run(render.transition_command(files, "transitions.txt", "video.mp4"), cwd=out_dir)
+        render.run(render.transition_command(files, script, "video.mp4"), cwd=out_dir)
     else:
         (out_dir / "concat.txt").write_text("\n".join(list_lines) + "\n", encoding="utf-8")
         render.run(render.concat_command("concat.txt", "video.mp4"), cwd=out_dir)
@@ -132,7 +132,7 @@ def _render_split(project, clip, i, src, offset, overlay_file, font, settings, o
         len(inputs), settings, clip.duration, labels, overlay_file, font, render.has_audio(inputs[0][0])
     )
     (out_dir / script).write_text(graph, encoding="utf-8")
-    render.run(render.split_command(inputs, clip.duration, script, clip_file), cwd=out_dir)
+    render.run(render.split_command(inputs, clip.duration, graph, clip_file), cwd=out_dir)
 
 
 def render_vertical(clip_files: list[Path], settings: Settings, out_dir: Path, progress=None) -> list[Path]:

@@ -157,11 +157,16 @@ def transition_filter(durations: list[float], fade: float, fps: int, edge_fade: 
     return ";\n".join(lines)
 
 
-def transition_command(clip_files: list[str], script_file: str, output: str) -> list[str]:
+def inline_graph(graph: str) -> str:
+    """Filtergraph direkt im Befehl übergeben – „-filter_complex_script“ gibt es ab ffmpeg 8/9 nicht mehr."""
+    return graph.replace("\n", "")
+
+
+def transition_command(clip_files: list[str], graph: str, output: str) -> list[str]:
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     for f in clip_files:
         cmd += ["-i", f]
-    return cmd + ["-filter_complex_script", script_file, "-map", "[vout]", "-map", "[aout]", *ENCODE, output]
+    return cmd + ["-filter_complex", inline_graph(graph), "-map", "[vout]", "-map", "[aout]", *ENCODE, output]
 
 
 def split_filter(
@@ -213,12 +218,12 @@ def split_filter(
     return ";\n".join(lines)
 
 
-def split_command(inputs: list[tuple[str, float]], duration: float, script_file: str, output: str) -> list[str]:
+def split_command(inputs: list[tuple[str, float]], duration: float, graph: str, output: str) -> list[str]:
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     for path, start in inputs:
         cmd += ["-ss", _fmt(start), "-t", _fmt(duration), "-i", str(path)]
     return cmd + [
-        "-filter_complex_script", script_file, "-map", "[vout]", "-map", "[aout]",
+        "-filter_complex", inline_graph(graph), "-map", "[vout]", "-map", "[aout]",
         "-t", _fmt(duration), *ENCODE, output,
     ]
 
