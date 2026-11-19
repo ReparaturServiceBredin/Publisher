@@ -39,9 +39,13 @@ IRC_URL = "wss://irc-ws.chat.twitch.tv:443"
 EVENTSUB_URL = "wss://eventsub.wss.twitch.tv/ws"
 HELIX_URL = "https://api.twitch.tv/helix"
 VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
+DEVICE_URL = "https://id.twitch.tv/oauth2/device"
+TOKEN_URL = "https://id.twitch.tv/oauth2/token"
+SCOPES = "chat:read chat:edit user:read:whispers"
 NTFY_URL = "https://ntfy.sh/"
 
 RECONNECT_DELAY_SEC = 10
+EXIT_LOGIN = 2  # Beendet, weil die Twitch-Anmeldung abgelaufen ist (Fenster zeigt dann wieder „Anmelden“)
 JOIN_BATCH_SIZE = 20
 JOIN_BATCH_INTERVAL_SEC = 10
 USER_AGENT = "TwitchGiveawayBot/1.0 (+python-urllib)"
@@ -107,6 +111,11 @@ def load_config(path: Path) -> dict:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise FatalError(f"config.json ist kein gültiges JSON (Zeile {exc.lineno}, Spalte {exc.colno}): {exc.msg}")
+    return normalize_config(raw)
+
+
+def normalize_config(raw: dict) -> dict:
+    """Prüft und vereinheitlicht die Einstellungen (aus config.json oder aus dem Fenster)."""
     cfg = {**DEFAULTS, **{k: v for k, v in raw.items() if not k.startswith("_")}}
 
     cfg["username"] = str(cfg["username"]).strip().lstrip("@").lower()
@@ -164,6 +173,92 @@ def http_json(url: str, *, method: str = "GET", headers: Optional[dict] = None,
             return exc.code, {"message": text[:300]}
 
 
+def http_form(url: str, fields: dict, timeout: float = 15) -> Tuple[int, dict]:
+    """POST application/x-www-form-urlencoded (für die Twitch-Anmeldung)."""
+    data = urllib.parse.urlencode(fields).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST", headers={
+        "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", "replace")
+        try:
+            return exc.code, json.loads(text) if text.strip() else {}
+        except ValueError:
+            return exc.code, {"message": text[:300]}
+
+
+# ---------------------------------------------------------------- Anmeldung per Gerätecode (ohne Passwort im Bot)
+
+def start_device_login(client_id: str) -> dict:
+    """Schritt 1: Code holen. Rückgabe enthält user_code und verification_uri (im Browser öffnen)."""
+    status, data = http_form(DEVICE_URL, {"client_id": client_id, "scopes": SCOPES})
+    if status != 200:
+        raise RuntimeError(f"Twitch-Anmeldung konnte nicht gestartet werden: {data.get('message', status)}")
+    return data
+
+
+def poll_device_login(client_id: str, device: dict, cancelled=lambda: False) -> dict:
+    """Schritt 2: warten, bis im Browser bestätigt wurde. Gibt die Token-Antwort zurück."""
+    interval = max(1, int(device.get("interval", 5)))
+    deadline = time.time() + int(device.get("expires_in", 1800))
+    while time.time() < deadline:
+        if cancelled():
+            raise RuntimeError("Anmeldung abgebrochen")
+        status, data = http_form(TOKEN_URL, {
+            "client_id": client_id, "scopes": SCOPES, "device_code": device["device_code"],
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        })
+        if status == 200 and data.get("access_token"):
+            return data
+        message = str(data.get("message", "")).lower()
+        if "pending" in message:
+            time.sleep(interval)
+            continue
+        if "slow_down" in message:
+            interval += 2
+            time.sleep(interval)
+            continue
+        raise RuntimeError("Anmeldung abgelehnt oder abgelaufen – bitte erneut versuchen."
+                           if "invalid" in message or "denied" in message or "expired" in message
+                           else f"Anmeldung fehlgeschlagen: {data.get('message', status)}")
+    raise RuntimeError("Die Anmeldung hat zu lange gedauert – bitte erneut versuchen.")
+
+
+class TokenManager:
+    """Erneuert den Token automatisch über den Refresh-Token (wenn vorhanden)."""
+
+    def __init__(self, cfg: dict, on_update=None):
+        self.cfg = cfg
+        self.on_update = on_update
+
+    @property
+    def can_refresh(self) -> bool:
+        return bool(self.cfg.get("refresh_token") and self.cfg.get("client_id"))
+
+    def refresh(self) -> bool:
+        if not self.can_refresh:
+            return False
+        fields = {"client_id": self.cfg["client_id"], "grant_type": "refresh_token",
+                  "refresh_token": self.cfg["refresh_token"]}
+        if self.cfg.get("client_secret"):
+            fields["client_secret"] = self.cfg["client_secret"]
+        status, data = http_form(TOKEN_URL, fields)
+        if status != 200 or not data.get("access_token"):
+            log.error("Token konnte nicht erneuert werden: %s", data.get("message", status))
+            return False
+        self.cfg["access_token"] = data["access_token"]
+        self.cfg["refresh_token"] = data.get("refresh_token", self.cfg["refresh_token"])
+        log.info("Twitch-Anmeldung automatisch erneuert ✔")
+        if self.on_update:
+            try:
+                self.on_update(self.cfg["access_token"], self.cfg["refresh_token"])
+            except Exception as exc:  # noqa: BLE001
+                log.error("Neuer Token konnte nicht gespeichert werden: %s", exc)
+        return True
+
+
 async def run_blocking(func, *args, **kwargs):
     """Blockierende urllib-Aufrufe im Thread ausführen, damit der Chat-Empfang nie stockt."""
     loop = asyncio.get_running_loop()
@@ -212,8 +307,15 @@ class Notifier:
 
 class TwitchApi:
     def __init__(self, cfg: dict):
-        self.client_id = cfg["client_id"]
-        self.token = cfg["access_token"]
+        self.cfg = cfg  # Token immer frisch aus cfg lesen – er kann zwischendurch erneuert werden
+
+    @property
+    def client_id(self) -> str:
+        return self.cfg["client_id"]
+
+    @property
+    def token(self) -> str:
+        return self.cfg["access_token"]
 
     def _headers(self) -> dict:
         return {"Client-Id": self.client_id, "Authorization": f"Bearer {self.token}"}
@@ -343,8 +445,9 @@ class Detector:
 # ====================================================================== Chat (IRC über WebSocket)
 
 class ChatBot:
-    def __init__(self, cfg: dict, notifier: Notifier, stop: asyncio.Event):
+    def __init__(self, cfg: dict, notifier: Notifier, stop: asyncio.Event, tokens: Optional[TokenManager] = None):
         self.cfg = cfg
+        self.tokens = tokens or TokenManager(cfg)
         self.notifier = notifier
         self.stop = stop
         self.detector = Detector(cfg)
@@ -415,9 +518,11 @@ class ChatBot:
         elif cmd == "NOTICE" and msg["text"] and ("authentication failed" in msg["text"].lower()
                                                    or "improperly formatted auth" in msg["text"].lower()):
             log.error("Chat-Anmeldung fehlgeschlagen: %s", msg["text"])
+            if await run_blocking(self.tokens.refresh):
+                raise ConnectionError("Token erneuert – verbinde neu")
             await self.notifier.send("Token abgelaufen",
-                                     "Die Anmeldung im Twitch-Chat ist fehlgeschlagen. Bitte einen neuen Token holen "
-                                     "und in config.json eintragen. Der Bot wurde beendet.", urgent=True)
+                                     "Die Anmeldung im Twitch-Chat ist fehlgeschlagen. Bitte im Bot neu mit Twitch "
+                                     "anmelden. Der Bot wurde beendet.", urgent=True)
             raise FatalError("Chat-Anmeldung fehlgeschlagen (Token abgelaufen oder falsch)")
         elif cmd == "NOTICE":
             channel = msg["params"][0].lstrip("#") if msg["params"] else "?"
@@ -481,8 +586,10 @@ class ChatBot:
 # ====================================================================== Flüsternachrichten (EventSub WebSocket)
 
 class WhisperListener:
-    def __init__(self, cfg: dict, api: TwitchApi, notifier: Notifier, stop: asyncio.Event):
+    def __init__(self, cfg: dict, api: TwitchApi, notifier: Notifier, stop: asyncio.Event,
+                 tokens: Optional[TokenManager] = None):
         self.cfg = cfg
+        self.tokens = tokens or TokenManager(cfg)
         self.api = api
         self.notifier = notifier
         self.stop = stop
@@ -566,8 +673,11 @@ class WhisperListener:
         elif status == 409:
             log.info("Flüsternachrichten sind bereits abonniert.")
         elif status == 401:
+            if await run_blocking(self.tokens.refresh):
+                raise ConnectionError("Token erneuert – abonniere neu")
             await self.notifier.send("Token abgelaufen", "Flüsternachrichten konnten nicht abonniert werden – "
-                                                         "bitte neuen Token holen. Der Bot wurde beendet.", urgent=True)
+                                                         "bitte im Bot neu mit Twitch anmelden. Der Bot wurde beendet.",
+                                     urgent=True)
             raise FatalError("Token abgelaufen (EventSub)")
         elif status == 403:
             self.disabled = True
@@ -598,12 +708,43 @@ async def main_async(config_path: Path) -> int:
     except FatalError as exc:
         log.error("%s", exc)
         return 1
+    return await run_bot(cfg)
+
+
+async def token_watch(api: TwitchApi, tokens: TokenManager, notifier: Notifier, stop: asyncio.Event) -> None:
+    """Twitch verlangt eine stündliche Token-Prüfung; kurz vor Ablauf wird automatisch erneuert."""
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=3600)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            info = await run_blocking(api.validate)
+            if int(info.get("expires_in", 99999)) < 7200:
+                await run_blocking(tokens.refresh)
+        except FatalError:
+            if not await run_blocking(tokens.refresh):
+                await notifier.send("Token abgelaufen", "Bitte im Bot neu mit Twitch anmelden.", urgent=True)
+                raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Stündliche Token-Prüfung fehlgeschlagen: %s", exc)
+
+
+async def run_bot(cfg: dict, stop: Optional[asyncio.Event] = None, on_token_update=None) -> int:
+    """Startet Chat + Flüsternachrichten mit einer fertigen Konfiguration (auch vom Fenster aus genutzt)."""
     notifier = Notifier(cfg)
     api = TwitchApi(cfg)
-    stop = asyncio.Event()
+    tokens = TokenManager(cfg, on_token_update)
+    stop = stop or asyncio.Event()
 
     try:
-        info = await run_blocking(api.validate)
+        try:
+            info = await run_blocking(api.validate)
+        except FatalError:
+            if not await run_blocking(tokens.refresh):
+                raise
+            info = await run_blocking(api.validate)
         login = info.get("login", "")
         log.info("Token gültig für %s, läuft noch ca. %d Stunden.", login, int(info.get("expires_in", 0)) // 3600)
         if login and login.lower() != cfg["username"]:
@@ -616,9 +757,9 @@ async def main_async(config_path: Path) -> int:
             log.warning("Dem Token fehlen Berechtigungen: %s", ", ".join(sorted(missing)))
     except FatalError:
         log.error("Der Token ist abgelaufen oder ungültig.")
-        await notifier.send("Token abgelaufen", "Der Twitch-Token ist abgelaufen oder ungültig. Bitte neuen Token "
-                                                "holen und in config.json eintragen. Der Bot wurde beendet.", urgent=True)
-        return 1
+        await notifier.send("Token abgelaufen", "Der Twitch-Token ist abgelaufen oder ungültig. Bitte im Bot neu mit "
+                                                "Twitch anmelden. Der Bot wurde beendet.", urgent=True)
+        return EXIT_LOGIN
     except Exception as exc:  # noqa: BLE001 – ohne Prüfung trotzdem weitermachen
         log.warning("Token konnte nicht geprüft werden (%s) – versuche es trotzdem.", exc)
 
@@ -626,9 +767,10 @@ async def main_async(config_path: Path) -> int:
     log.info("Bot startet für %s in %d Kanal/Kanälen – Modus: %s", cfg["username"], len(cfg["channels"]), mode)
     await notifier.send("Bot gestartet", f"Überwache {len(cfg['channels'])} Kanäle als {cfg['username']}. Modus: {mode}")
 
-    chat = ChatBot(cfg, notifier, stop)
-    whispers = WhisperListener(cfg, api, notifier, stop)
-    tasks = [asyncio.ensure_future(chat.run()), asyncio.ensure_future(whispers.run())]
+    chat = ChatBot(cfg, notifier, stop, tokens)
+    whispers = WhisperListener(cfg, api, notifier, stop, tokens)
+    tasks = [asyncio.ensure_future(chat.run()), asyncio.ensure_future(whispers.run()),
+             asyncio.ensure_future(token_watch(api, tokens, notifier, stop))]
     exit_code = 0
     try:
         pending = set(tasks)
@@ -638,7 +780,7 @@ async def main_async(config_path: Path) -> int:
                 exc = t.exception()
                 if isinstance(exc, FatalError):
                     log.error("Bot wird beendet: %s", exc)
-                    exit_code = 1
+                    exit_code = EXIT_LOGIN if "token" in str(exc).lower() or "anmeldung" in str(exc).lower() else 1
                     stop.set()
                 elif exc is not None:
                     log.error("Unerwarteter Fehler: %s", exc)
