@@ -48,6 +48,8 @@ RECONNECT_DELAY_SEC = 10
 EXIT_LOGIN = 2  # Beendet, weil die Twitch-Anmeldung abgelaufen ist (Fenster zeigt dann wieder „Anmelden“)
 JOIN_BATCH_SIZE = 20
 JOIN_BATCH_INTERVAL_SEC = 10
+HEARTBEAT_SEC = 600
+LOGIN_TIMEOUT_SEC = 30
 JOIN_CHECK_SEC = 15  # so lange auf Twitchs JOIN-Bestätigung warten
 USER_AGENT = "TwitchGiveawayBot/1.0 (+python-urllib)"
 
@@ -283,6 +285,51 @@ class TokenManager:
         return True
 
 
+def keep_awake(on: bool) -> None:
+    """Windows: PC nicht in den Standby gehen lassen, solange der Bot läuft (Bildschirm darf ausgehen)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+        if on:
+            log.info("Standby ist deaktiviert, solange der Bot läuft (Bildschirm darf ausgehen).")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Standby konnte nicht verhindert werden: %s", exc)
+
+
+def describe_error(exc: BaseException) -> str:
+    """Verständlicher Text statt leerer Klammern bei Verbindungsabbrüchen."""
+    if isinstance(exc, ConnectionClosed):
+        rcvd = getattr(exc, "rcvd", None)
+        code = getattr(rcvd, "code", None) if rcvd is not None else getattr(exc, "code", None)
+        return f"Verbindung von Twitch geschlossen (Code {code})" if code else "Verbindung abgebrochen (Internet weg?)"
+    if isinstance(exc, asyncio.TimeoutError):
+        return "Zeitüberschreitung – keine Antwort"
+    if isinstance(exc, OSError):
+        return f"Netzwerkfehler: {exc.strerror or exc}" if (exc.strerror or str(exc)) else "Netzwerkfehler"
+    return str(exc) or type(exc).__name__
+
+
+async def sleep_watch(stop: asyncio.Event) -> None:
+    """Erkennt, wenn der PC im Standby war (die Uhr springt) – dann konnte der Bot nichts sehen."""
+    last = time.time()
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=20)
+            return
+        except asyncio.TimeoutError:
+            pass
+        now = time.time()
+        gap = now - last - 20
+        if gap > 60:
+            log.warning("⚠ Der PC war ca. %d Minuten im Standby/Ruhezustand – in dieser Zeit konnte der Bot "
+                        "nichts mitbekommen. Er verbindet sich jetzt neu.", gap // 60 or 1)
+        last = now
+
+
 async def run_blocking(func, *args, **kwargs):
     """Blockierende urllib-Aufrufe im Thread ausführen, damit der Chat-Empfang nie stockt."""
     loop = asyncio.get_running_loop()
@@ -404,6 +451,16 @@ def clean_channels(raws) -> Tuple[list, list]:
 IRC_LINE = re.compile(r"^(?:@(?P<tags>\S+) )?(?::(?P<prefix>\S+) )?(?P<command>\S+)(?P<params>.*)$")
 COMMAND_RE = re.compile(r"(?<!\S)(![A-Za-z0-9_]+)")
 SINGLE_COMMAND_RE = re.compile(r"^![A-Za-z0-9_]+$")
+SINGLE_WORD_RE = re.compile(r"^[^\s@/:]{2,25}$")
+# „Schreibt 'Monte' in den Chat“, „type join to enter“, „Stichwort: Kekse“
+KEYWORD_RE = re.compile(
+    r"(?:\btype|\btipp(?:e|t)?|\bschreib(?:t|e)?|\benter with|\bstichwort|\bkeyword|\bmit dem wort)"
+    r"\s*[:\-]?\s*[\"'„“‚‘`*]?(!?[A-Za-z0-9_äöüÄÖÜß]{2,25})",
+    re.IGNORECASE,
+)
+KEYWORD_STOPWORDS = {"in", "im", "den", "the", "a", "an", "to", "ein", "eine", "einfach", "jetzt", "mal", "now",
+                     "into", "chat", "hier", "folgendes", "das", "dies", "this", "und", "and", "es", "it"}
+HINT_WINDOW_SEC = 600  # so lange nach einem Giveaway-Hinweis zählen auch Wort-Bursts ohne „!“
 
 
 def parse_irc(line: str) -> Optional[dict]:
@@ -442,7 +499,9 @@ class Detector:
         self.me_re = re.compile(rf"(?<![\w@])@?{re.escape(self.me)}(?!\w)", re.IGNORECASE)
         self.burst: Dict[Tuple[str, str], Deque[Tuple[float, str]]] = defaultdict(deque)
         self.last_entry: Dict[str, float] = {}
+        self.hint: Dict[str, float] = {}  # Kanal → Zeitpunkt der letzten Giveaway-Ansage von Bot/Mod/Streamer
         self.on_skip = lambda channel, command, reason: None
+        self.on_hint = lambda channel, sender, text: None
 
     def first_command(self, text: str) -> Optional[str]:
         for cmd in COMMAND_RE.findall(text):
@@ -451,18 +510,34 @@ class Detector:
                 return cmd
         return None
 
-    def check_giveaway(self, channel: str, sender: str, text: str, now: Optional[float] = None) -> Optional[Tuple[str, str]]:
-        """Gibt (Befehl, Grund) zurück, wenn ein Eintrag fällig ist – sonst None."""
+    def keyword(self, text: str) -> Optional[str]:
+        for m in KEYWORD_RE.finditer(text):
+            word = m.group(1)
+            if word.lower() in KEYWORD_STOPWORDS:
+                continue
+            if word.startswith("!") and word.lower() in self.cfg["blocked_commands"]:
+                continue
+            return word
+        return None
+
+    def check_giveaway(self, channel: str, sender: str, text: str, now: Optional[float] = None,
+                       privileged: bool = False) -> Optional[Tuple[str, str]]:
+        """Gibt (Befehl, Grund) zurück, wenn ein Eintrag fällig ist – sonst None.
+
+        privileged = Nachricht vom Streamer oder einem Mod (aus den Twitch-Badges)."""
         now = time.monotonic() if now is None else now
         if sender == self.me:
             return None
         lower = text.lower()
         found: Optional[Tuple[str, str]] = None
-        # 1) Giveaway-Bot kündigt an
-        if sender in self.cfg["giveaway_bots"] and any(w in lower for w in GIVEAWAY_WORDS):
-            cmd = self.first_command(text)
+        # 1) Giveaway-Bot, Streamer oder Mod kündigt an
+        if (sender in self.cfg["giveaway_bots"] or privileged) and any(w in lower for w in GIVEAWAY_WORDS):
+            self.hint[channel] = now
+            self.on_hint(channel, sender, text)
+            cmd = self.first_command(text) or self.keyword(text)
+            who = sender if sender in self.cfg["giveaway_bots"] else f"{sender} (Mod/Streamer)"
             if cmd:
-                found = (cmd, f"Ansage von {sender}")
+                found = (cmd, f"Ansage von {who}")
         # 2) Burst: viele verschiedene Nutzer schreiben denselben einzelnen Befehl
         stripped = text.strip()
         if SINGLE_COMMAND_RE.match(stripped):
@@ -477,6 +552,19 @@ class Detector:
                 if len(users) >= self.cfg["burst_min_users"] and found is None:
                     found = (cmd, f"{len(users)} Nutzer schrieben {cmd} in {window:.0f} s")
                     q.clear()
+        # 3) Wort-Giveaway ohne „!“: nur kurz nach einer Giveaway-Ansage, sonst wäre Emote-Spam ein „Giveaway“
+        elif (now - self.hint.get(channel, -1e9) <= HINT_WINDOW_SEC and SINGLE_WORD_RE.match(stripped)
+              and not stripped.startswith("!")):
+            word = stripped
+            q = self.burst[(channel, "word:" + word.lower())]
+            q.append((now, sender))
+            window = self.cfg["burst_window_sec"]
+            while q and now - q[0][0] > window:
+                q.popleft()
+            users = {u for _, u in q}
+            if len(users) >= self.cfg["burst_min_users"] and found is None:
+                found = (word, f"{len(users)} Nutzer schrieben „{word}“ kurz nach einer Giveaway-Ansage")
+                q.clear()
         if found is None:
             return None
         if not self.cooldown_ok(channel, now):
@@ -518,11 +606,15 @@ class ChatBot:
         self.emit = emit or _no_event  # Rückmeldungen fürs Fenster (Status, Einträge, Kanäle)
         self.entry_seq = 0
         self.awaiting: Dict[str, int] = {}
-        self.joined: Set[str] = set()  # Kanal → Eintrags-Nr., auf deren Bestätigung durch Twitch gewartet wird
+        self.joined: Set[str] = set()
+        self.logged_in = False
+        self.heartbeat_task: Optional[asyncio.Task] = None  # Kanal → Eintrags-Nr., auf deren Bestätigung durch Twitch gewartet wird
         self.notifier = notifier
         self.stop = stop
         self.detector = Detector(cfg)
         self.detector.on_skip = lambda ch, cmd, why: self.emit("skipped", channel=ch, command=cmd, reason=why)
+        self.detector.on_hint = lambda ch, who, text: log.info("💬 Giveaway-Hinweis in #%s von %s: %s", ch, who, text)
+        self.msg_counts: Dict[str, int] = {}
         self.ws = None
         self.tasks: Set[asyncio.Task] = set()
         self.join_task: Optional[asyncio.Task] = None
@@ -545,7 +637,7 @@ class ChatBot:
             except FatalError:
                 raise
             except (ConnectionClosed, OSError, asyncio.TimeoutError) as exc:
-                log.warning("Chat-Verbindung getrennt: %s", exc or type(exc).__name__)
+                log.warning("Chat-Verbindung getrennt: %s", describe_error(exc))
             except Exception as exc:  # noqa: BLE001
                 log.exception("Unerwarteter Fehler in der Chat-Verbindung: %s", exc)
             finally:
@@ -571,9 +663,15 @@ class ChatBot:
             await ws.send("CAP REQ :twitch.tv/tags twitch.tv/commands")
             await ws.send(f"PASS oauth:{self.cfg['access_token']}")
             await ws.send(f"NICK {self.cfg['username']}")
+            self.logged_in = False
             while True:
-                # Twitch schickt etwa alle 5 Minuten ein PING – nach 6 Minuten Stille gilt die Verbindung als tot
-                raw = await asyncio.wait_for(ws.recv(), timeout=360)
+                # Twitch schickt etwa alle 5 Minuten ein PING – nach 6 Minuten Stille gilt die Verbindung als tot.
+                # Bis zur Anmeldung höchstens 30 s warten (z. B. nach dem Aufwachen aus dem Standby).
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=360 if self.logged_in else LOGIN_TIMEOUT_SEC)
+                except asyncio.TimeoutError:
+                    raise ConnectionError("keine Antwort vom Chat-Server" if not self.logged_in
+                                          else "6 Minuten keine Daten vom Chat-Server")
                 if isinstance(raw, bytes):
                     raw = raw.decode("utf-8", "replace")
                 for line in raw.split("\r\n"):
@@ -589,8 +687,11 @@ class ChatBot:
             await self.send_raw(f"PONG :{msg['text'] or 'tmi.twitch.tv'}")
         elif cmd == "001":
             log.info("Im Chat angemeldet als %s.", self.cfg["username"])
+            self.logged_in = True
             self.emit("chat", state="verbunden")
             self.join_task = self._spawn(self._join_channels())
+            if self.heartbeat_task is None or self.heartbeat_task.done():
+                self.heartbeat_task = self._spawn(self._heartbeat())
         elif cmd == "NOTICE" and msg["text"] and ("authentication failed" in msg["text"].lower()
                                                    or "improperly formatted auth" in msg["text"].lower()):
             log.error("Chat-Anmeldung fehlgeschlagen: %s", msg["text"])
@@ -628,7 +729,21 @@ class ChatBot:
         elif cmd == "PRIVMSG" and msg["params"] and msg["text"] is not None:
             channel = msg["params"][0].lstrip("#").lower()
             sender = (msg["tags"].get("login") or msg["nick"] or "").lower()
-            await self._on_message(channel, sender, msg["tags"].get("display-name") or sender, msg["text"])
+            badges = msg["tags"].get("badges", "")
+            privileged = "broadcaster/" in badges or "moderator/" in badges or msg["tags"].get("mod") == "1" \
+                or sender == channel
+            await self._on_message(channel, sender, msg["tags"].get("display-name") or sender, msg["text"], privileged)
+
+    async def _heartbeat(self) -> None:
+        """Alle 10 Minuten ein Lebenszeichen ins Protokoll – so sieht man, dass der Bot wirklich mitliest."""
+        while True:
+            await asyncio.sleep(HEARTBEAT_SEC)
+            counts, self.msg_counts = self.msg_counts, {}
+            if not self.joined:
+                log.warning("Lebenszeichen: in keinem Kanal – Verbindung wird wiederhergestellt …")
+                continue
+            parts = [f"#{c}: {counts.get(c, 0):,} Nachrichten".replace(",", ".") for c in sorted(self.joined)]
+            log.info("Läuft ✔ – letzte %d Min: %s", HEARTBEAT_SEC // 60, ", ".join(parts))
 
     async def _check_joined(self, batch: list) -> None:
         """Twitch ignoriert unbekannte Kanäle stillschweigend – nach 15 s melden, was nicht geklappt hat."""
@@ -649,8 +764,9 @@ class ChatBot:
             if i + JOIN_BATCH_SIZE < len(channels):
                 await asyncio.sleep(JOIN_BATCH_INTERVAL_SEC)
 
-    async def _on_message(self, channel: str, sender: str, display: str, text: str) -> None:
+    async def _on_message(self, channel: str, sender: str, display: str, text: str, privileged: bool = False) -> None:
         self.emit("message", channel=channel)
+        self.msg_counts[channel] = self.msg_counts.get(channel, 0) + 1
         if self.detector.is_entry_confirmation(sender, text):
             log.info("✔ %s bestätigt deinen Eintrag in #%s: %s", display, channel, text)
             self.emit("confirmed", channel=channel, sender=display, text=text)
@@ -662,7 +778,7 @@ class ChatBot:
                 f"Kanal: {channel}\nVon: {display}\nNachricht: {text}\nhttps://twitch.tv/{channel}",
                 urgent=True, click=f"https://twitch.tv/{channel}",
             ))
-        hit = self.detector.check_giveaway(channel, sender, text)
+        hit = self.detector.check_giveaway(channel, sender, text, privileged=privileged)
         if hit:
             command, reason = hit
             log.info("Giveaway in #%s erkannt (%s) → Eintrag mit %s geplant.", channel, reason, command)
@@ -753,7 +869,7 @@ class WhisperListener:
                 ws, url, subscribe = None, EVENTSUB_URL, True
                 if self.stop.is_set() or self.disabled:
                     break
-                log.warning("EventSub getrennt (%s) – neuer Versuch in %d Sekunden.", exc or type(exc).__name__,
+                log.warning("EventSub getrennt (%s) – neuer Versuch in %d Sekunden.", describe_error(exc),
                             RECONNECT_DELAY_SEC)
                 try:
                     await asyncio.wait_for(self.stop.wait(), timeout=RECONNECT_DELAY_SEC)
@@ -900,7 +1016,8 @@ async def run_bot(cfg: dict, stop: Optional[asyncio.Event] = None, on_token_upda
     chat = ChatBot(cfg, notifier, stop, tokens, emit=on_event)
     whispers = WhisperListener(cfg, api, notifier, stop, tokens, emit=on_event)
     tasks = [asyncio.ensure_future(chat.run()), asyncio.ensure_future(whispers.run()),
-             asyncio.ensure_future(token_watch(api, tokens, notifier, stop))]
+             asyncio.ensure_future(token_watch(api, tokens, notifier, stop)), asyncio.ensure_future(sleep_watch(stop))]
+    keep_awake(True)
     exit_code = 0
     try:
         pending = set(tasks)
@@ -917,6 +1034,7 @@ async def run_bot(cfg: dict, stop: Optional[asyncio.Event] = None, on_token_upda
             if exit_code:
                 break
     finally:
+        keep_awake(False)
         stop.set()
         for t in tasks + list(chat.tasks):
             t.cancel()
