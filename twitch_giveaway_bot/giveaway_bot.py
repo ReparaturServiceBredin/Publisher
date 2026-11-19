@@ -50,6 +50,26 @@ JOIN_BATCH_SIZE = 20
 JOIN_BATCH_INTERVAL_SEC = 10
 USER_AGENT = "TwitchGiveawayBot/1.0 (+python-urllib)"
 
+ENTRY_CONFIRM_WORDS = ("entered", "joined", "eingetragen", "teilgenommen", "dabei", "ticket", "entry", "registriert")
+NOTICE_REASONS = {
+    "msg_banned": "du bist in diesem Kanal gebannt",
+    "msg_timedout": "du hast gerade einen Timeout",
+    "msg_duplicate": "gleiche Nachricht zu schnell wiederholt",
+    "msg_ratelimit": "zu viele Nachrichten in kurzer Zeit",
+    "msg_followersonly": "nur Follower dürfen schreiben",
+    "msg_followersonly_followed": "du folgst noch nicht lange genug",
+    "msg_followersonly_zero": "nur Follower dürfen schreiben",
+    "msg_subsonly": "nur Abonnenten dürfen schreiben",
+    "msg_emoteonly": "nur Emotes erlaubt",
+    "msg_slowmode": "Slow-Mode aktiv",
+    "msg_r9k": "Unique-Chat aktiv (Nachricht schon geschrieben)",
+    "msg_verified_email": "deine E-Mail-Adresse ist nicht bestätigt",
+    "msg_requires_verified_phone_number": "der Kanal verlangt eine bestätigte Telefonnummer",
+    "msg_channel_suspended": "der Kanal ist gesperrt",
+    "msg_suspended": "dein Account ist gesperrt",
+    "msg_channel_blocked": "du kannst hier nicht schreiben",
+}
+
 GIVEAWAY_WORDS = ("giveaway", "raffle", "gewinnspiel", "verlosung", "ticket")
 WIN_WORDS = ("won", "winner", "gewonnen", "gewinner", "gratul", "glückwunsch", "congrat")
 
@@ -389,6 +409,7 @@ class Detector:
         self.me_re = re.compile(rf"(?<![\w@])@?{re.escape(self.me)}(?!\w)", re.IGNORECASE)
         self.burst: Dict[Tuple[str, str], Deque[Tuple[float, str]]] = defaultdict(deque)
         self.last_entry: Dict[str, float] = {}
+        self.on_skip = lambda channel, command, reason: None
 
     def first_command(self, text: str) -> Optional[str]:
         for cmd in COMMAND_RE.findall(text):
@@ -427,6 +448,7 @@ class Detector:
             return None
         if not self.cooldown_ok(channel, now):
             log.info("#%s: Giveaway erkannt (%s), aber Cooldown aktiv – kein Eintrag.", channel, found[1])
+            self.on_skip(channel, found[0], found[1])
             return None
         self.last_entry[channel] = now  # sofort sperren, damit keine doppelten Einträge geplant werden
         return found
@@ -434,6 +456,13 @@ class Detector:
     def cooldown_ok(self, channel: str, now: float) -> bool:
         last = self.last_entry.get(channel)
         return last is None or now - last >= self.cfg["entry_cooldown_sec"]
+
+    def is_entry_confirmation(self, sender: str, text: str) -> bool:
+        """Giveaway-Bot nennt dich zusammen mit „entered/eingetragen/…“ (ohne Gewinn-Wörter)."""
+        if sender not in self.cfg["giveaway_bots"] or not self.me_re.search(text):
+            return False
+        lower = text.lower()
+        return any(w in lower for w in ENTRY_CONFIRM_WORDS) and not any(w in lower for w in WIN_WORDS)
 
     def is_win(self, sender: str, text: str) -> bool:
         if sender == self.me:
@@ -444,13 +473,22 @@ class Detector:
 
 # ====================================================================== Chat (IRC über WebSocket)
 
+def _no_event(kind: str, **data) -> None:
+    pass
+
+
 class ChatBot:
-    def __init__(self, cfg: dict, notifier: Notifier, stop: asyncio.Event, tokens: Optional[TokenManager] = None):
+    def __init__(self, cfg: dict, notifier: Notifier, stop: asyncio.Event, tokens: Optional[TokenManager] = None,
+                 emit=None):
         self.cfg = cfg
         self.tokens = tokens or TokenManager(cfg)
+        self.emit = emit or _no_event  # Rückmeldungen fürs Fenster (Status, Einträge, Kanäle)
+        self.entry_seq = 0
+        self.awaiting: Dict[str, int] = {}  # Kanal → Eintrags-Nr., auf deren Bestätigung durch Twitch gewartet wird
         self.notifier = notifier
         self.stop = stop
         self.detector = Detector(cfg)
+        self.detector.on_skip = lambda ch, cmd, why: self.emit("skipped", channel=ch, command=cmd, reason=why)
         self.ws = None
         self.tasks: Set[asyncio.Task] = set()
         self.join_task: Optional[asyncio.Task] = None
@@ -478,6 +516,7 @@ class ChatBot:
                 log.exception("Unerwarteter Fehler in der Chat-Verbindung: %s", exc)
             finally:
                 self.ws = None
+                self.emit("chat", state="getrennt")
                 if self.join_task:
                     self.join_task.cancel()
                     self.join_task = None
@@ -491,6 +530,7 @@ class ChatBot:
 
     async def _session(self) -> None:
         log.info("Verbinde mit dem Twitch-Chat …")
+        self.emit("chat", state="verbinde …")
         async with websockets.connect(IRC_URL, ping_interval=None, max_size=2 ** 20) as ws:
             self.ws = ws
             await ws.send("CAP REQ :twitch.tv/tags twitch.tv/commands")
@@ -514,6 +554,7 @@ class ChatBot:
             await self.send_raw(f"PONG :{msg['text'] or 'tmi.twitch.tv'}")
         elif cmd == "001":
             log.info("Im Chat angemeldet als %s.", self.cfg["username"])
+            self.emit("chat", state="verbunden")
             self.join_task = self._spawn(self._join_channels())
         elif cmd == "NOTICE" and msg["text"] and ("authentication failed" in msg["text"].lower()
                                                    or "improperly formatted auth" in msg["text"].lower()):
@@ -525,13 +566,29 @@ class ChatBot:
                                      "anmelden. Der Bot wurde beendet.", urgent=True)
             raise FatalError("Chat-Anmeldung fehlgeschlagen (Token abgelaufen oder falsch)")
         elif cmd == "NOTICE":
-            channel = msg["params"][0].lstrip("#") if msg["params"] else "?"
+            channel = msg["params"][0].lstrip("#").lower() if msg["params"] else "?"
             log.info("Hinweis von Twitch (#%s): %s", channel, msg["text"])
+            entry_id = self.awaiting.pop(channel, None)
+            if entry_id is not None:
+                msg_id = msg["tags"].get("msg-id", "")
+                reason = NOTICE_REASONS.get(msg_id) or (msg["text"] or msg_id or "unbekannter Grund")
+                log.error("❌ Eintrag in #%s abgelehnt: %s", channel, reason)
+                self.emit("entry", id=entry_id, channel=channel, status="abgelehnt", detail=reason)
+                self.detector.last_entry.pop(channel, None)  # bei nächster Gelegenheit erneut versuchen
+                self._spawn(self.notifier.send(f"Eintrag in #{channel} abgelehnt", f"Grund: {reason}"))
+        elif cmd == "USERSTATE" and msg["params"]:
+            channel = msg["params"][0].lstrip("#").lower()
+            entry_id = self.awaiting.pop(channel, None)
+            if entry_id is not None:  # Twitch bestätigt eine gesendete Nachricht mit USERSTATE
+                log.info("✔ Twitch hat deinen Eintrag in #%s angenommen.", channel)
+                self.emit("entry", id=entry_id, channel=channel, status="angenommen", detail="von Twitch angenommen")
         elif cmd == "RECONNECT":
             log.info("Twitch bittet um Neuverbindung.")
             raise ConnectionError("RECONNECT von Twitch")
         elif cmd == "JOIN" and msg["nick"] == self.cfg["username"]:
-            log.info("Kanal #%s betreten.", msg["params"][0].lstrip("#") if msg["params"] else "?")
+            channel = msg["params"][0].lstrip("#").lower() if msg["params"] else "?"
+            log.info("Kanal #%s betreten.", channel)
+            self.emit("joined", channel=channel)
         elif cmd == "PRIVMSG" and msg["params"] and msg["text"] is not None:
             channel = msg["params"][0].lstrip("#").lower()
             sender = (msg["tags"].get("login") or msg["nick"] or "").lower()
@@ -548,7 +605,12 @@ class ChatBot:
                 await asyncio.sleep(JOIN_BATCH_INTERVAL_SEC)
 
     async def _on_message(self, channel: str, sender: str, display: str, text: str) -> None:
+        self.emit("message", channel=channel)
+        if self.detector.is_entry_confirmation(sender, text):
+            log.info("✔ %s bestätigt deinen Eintrag in #%s: %s", display, channel, text)
+            self.emit("confirmed", channel=channel, sender=display, text=text)
         if self.detector.is_win(sender, text):
+            self.emit("win", channel=channel, sender=display, text=text)
             log.warning("🎉 MÖGLICHER GEWINN in #%s von %s: %s", channel, display, text)
             self._spawn(self.notifier.send(
                 f"🎉 Gewinn in #{channel}?",
@@ -559,36 +621,55 @@ class ChatBot:
         if hit:
             command, reason = hit
             log.info("Giveaway in #%s erkannt (%s) → Eintrag mit %s geplant.", channel, reason, command)
-            self._spawn(self._enter(channel, command, reason))
+            self.entry_seq += 1
+            self._spawn(self._enter(channel, command, reason, self.entry_seq))
 
-    async def _enter(self, channel: str, command: str, reason: str) -> None:
+    async def _enter(self, channel: str, command: str, reason: str, entry_id: int = 0) -> None:
         low, high = self.cfg["entry_delay_sec"]
         delay = random.uniform(low, high)
         log.info("#%s: warte %.1f s vor dem Eintrag …", channel, delay)
+        self.emit("entry", id=entry_id, channel=channel, command=command, status="erkannt",
+                  detail=f"{reason} – sende in {delay:.0f} s")
         await asyncio.sleep(delay)
         if self.cfg["dry_run"]:
             log.info("[DRY-RUN] Würde in #%s senden: %s", channel, command)
+            self.emit("entry", id=entry_id, channel=channel, status="testmodus",
+                      detail="Testmodus – nicht gesendet")
             await self.notifier.send(f"Dry-Run: Giveaway in #{channel}",
                                      f"Würde „{command}“ senden ({reason}).", click=f"https://twitch.tv/{channel}")
             return
         try:
+            self.awaiting[channel] = entry_id
             await self.send_raw(f"PRIVMSG #{channel} :{command}")
         except Exception as exc:  # noqa: BLE001
+            self.awaiting.pop(channel, None)
             log.error("Eintrag in #%s fehlgeschlagen (%s) – Verbindung weg?", channel, exc)
+            self.emit("entry", id=entry_id, channel=channel, status="fehler", detail=f"nicht gesendet: {exc}")
             self.detector.last_entry.pop(channel, None)  # später erneut erlauben
             return
         log.info("✅ In #%s eingetragen mit %s.", channel, command)
+        self.emit("entry", id=entry_id, channel=channel, status="gesendet", detail="gesendet, warte auf Twitch …")
+        self._spawn(self._confirm_timeout(channel, entry_id))
         if self.cfg["notify_on_entry"]:
             await self.notifier.send(f"Eingetragen in #{channel}", f"Gesendet: {command} ({reason})",
                                      click=f"https://twitch.tv/{channel}")
+
+
+    async def _confirm_timeout(self, channel: str, entry_id: int) -> None:
+        await asyncio.sleep(6)
+        if self.awaiting.get(channel) == entry_id:
+            self.awaiting.pop(channel, None)
+            self.emit("entry", id=entry_id, channel=channel, status="gesendet",
+                      detail="gesendet (keine Rückmeldung von Twitch)")
 
 
 # ====================================================================== Flüsternachrichten (EventSub WebSocket)
 
 class WhisperListener:
     def __init__(self, cfg: dict, api: TwitchApi, notifier: Notifier, stop: asyncio.Event,
-                 tokens: Optional[TokenManager] = None):
+                 tokens: Optional[TokenManager] = None, emit=None):
         self.cfg = cfg
+        self.emit = emit or _no_event
         self.tokens = tokens or TokenManager(cfg)
         self.api = api
         self.notifier = notifier
@@ -670,8 +751,10 @@ class WhisperListener:
         status, data = await run_blocking(self.api.subscribe_whispers, self.user_id, session_id)
         if status in (200, 202):
             log.info("Flüsternachrichten abonniert ✔")
+            self.emit("whispers", state="aktiv")
         elif status == 409:
             log.info("Flüsternachrichten sind bereits abonniert.")
+            self.emit("whispers", state="aktiv")
         elif status == 401:
             if await run_blocking(self.tokens.refresh):
                 raise ConnectionError("Token erneuert – abonniere neu")
@@ -681,6 +764,7 @@ class WhisperListener:
             raise FatalError("Token abgelaufen (EventSub)")
         elif status == 403:
             self.disabled = True
+            self.emit("whispers", state="keine Berechtigung")
             log.error("Kein Zugriff auf Flüsternachrichten (%s). Fehlt der Scope user:read:whispers oder gehört der "
                       "Token zu einer anderen Client-ID? Chat-Erkennung läuft weiter.", data.get("message", ""))
             await self.notifier.send("Flüsternachrichten deaktiviert",
@@ -696,6 +780,7 @@ class WhisperListener:
         name = ev.get("from_user_name") or ev.get("from_user_login") or "Unbekannt"
         text = (ev.get("whisper") or {}).get("text", "")
         log.warning("✉ Flüsternachricht von %s: %s", name, text)
+        self.emit("whisper", sender=name, text=text)
         await self.notifier.send(f"Flüsternachricht von {name}", text or "(leer)", urgent=True,
                                  click="https://www.twitch.tv/popout/moderator/whispers")
 
@@ -731,7 +816,7 @@ async def token_watch(api: TwitchApi, tokens: TokenManager, notifier: Notifier, 
             log.warning("Stündliche Token-Prüfung fehlgeschlagen: %s", exc)
 
 
-async def run_bot(cfg: dict, stop: Optional[asyncio.Event] = None, on_token_update=None) -> int:
+async def run_bot(cfg: dict, stop: Optional[asyncio.Event] = None, on_token_update=None, on_event=None) -> int:
     """Startet Chat + Flüsternachrichten mit einer fertigen Konfiguration (auch vom Fenster aus genutzt)."""
     notifier = Notifier(cfg)
     api = TwitchApi(cfg)
@@ -767,8 +852,8 @@ async def run_bot(cfg: dict, stop: Optional[asyncio.Event] = None, on_token_upda
     log.info("Bot startet für %s in %d Kanal/Kanälen – Modus: %s", cfg["username"], len(cfg["channels"]), mode)
     await notifier.send("Bot gestartet", f"Überwache {len(cfg['channels'])} Kanäle als {cfg['username']}. Modus: {mode}")
 
-    chat = ChatBot(cfg, notifier, stop, tokens)
-    whispers = WhisperListener(cfg, api, notifier, stop, tokens)
+    chat = ChatBot(cfg, notifier, stop, tokens, emit=on_event)
+    whispers = WhisperListener(cfg, api, notifier, stop, tokens, emit=on_event)
     tasks = [asyncio.ensure_future(chat.run()), asyncio.ensure_future(whispers.run()),
              asyncio.ensure_future(token_watch(api, tokens, notifier, stop))]
     exit_code = 0

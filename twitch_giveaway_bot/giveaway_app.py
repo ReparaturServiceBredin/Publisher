@@ -14,6 +14,7 @@ import queue
 import secrets
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -129,6 +130,14 @@ class App(tk.Tk):
         st.configure("Card.TCheckbutton", background=CARD, foreground=FG)
         st.map("Card.TCheckbutton", background=[("active", CARD)])
         st.configure("TEntry", fieldbackground="#14141C", foreground=FG, insertcolor=FG)
+        st.configure("Status.TLabel", background=CARD, foreground=FG, font=("Segoe UI", 10, "bold"), padding=(12, 8))
+        st.configure("Treeview", background="#14141C", fieldbackground="#14141C", foreground=FG, rowheight=24,
+                     borderwidth=0)
+        st.configure("Treeview.Heading", background=CARD, foreground=MUTED, relief="flat", font=("Segoe UI", 9, "bold"))
+        st.map("Treeview", background=[("selected", "#2A2A40")])
+        st.configure("TNotebook", background=BG, borderwidth=0)
+        st.configure("TNotebook.Tab", background=CARD, foreground=MUTED, padding=(10, 5))
+        st.map("TNotebook.Tab", background=[("selected", ACCENT)], foreground=[("selected", "white")])
 
     def _card(self, title: str) -> ttk.Frame:
         outer = ttk.Frame(self.body, style="Card.TFrame", padding=14)
@@ -143,6 +152,7 @@ class App(tk.Tk):
 
         # --- Konto
         acc = self._card("1  Twitch-Konto")
+        self.acc_card = acc
         self.acc_status = ttk.Label(acc, text="", style="Card.TLabel")
         self.acc_status.pack(anchor="w")
         self.client_row = ttk.Frame(acc, style="Card.TFrame")
@@ -161,6 +171,7 @@ class App(tk.Tk):
 
         # --- Kanäle
         ch = self._card("2  Kanäle (einer pro Zeile)")
+        self.ch_card = ch
         self.channels = tk.Text(ch, height=4, bg="#14141C", fg=FG, insertbackground=FG, relief="flat",
                                 font=("Segoe UI", 10))
         self.channels.insert("1.0", "\n".join(self.settings["channels"] or []))
@@ -170,6 +181,7 @@ class App(tk.Tk):
 
         # --- Handy
         ph = self._card("3  Benachrichtigung aufs Handy")
+        self.ph_card = ph
         ttk.Label(ph, text="App „ntfy“ installieren und dort dieses Thema abonnieren (geheim halten):",
                   style="Card.TLabel").pack(anchor="w")
         row = ttk.Frame(ph, style="Card.TFrame")
@@ -191,7 +203,7 @@ class App(tk.Tk):
         ttk.Entry(drow, textvariable=self.discord_var).pack(side="left", fill="x", expand=True, padx=6)
 
         # --- Optionen + Start
-        op = self._card("4  Los geht's")
+        op = self._card("Los geht's")
         self.dry_var = tk.BooleanVar(value=bool(self.settings["dry_run"]))
         self.entry_push_var = tk.BooleanVar(value=bool(self.settings["notify_on_entry"]))
         self.auto_var = tk.BooleanVar(value=bool(self.settings["autostart"]))
@@ -210,11 +222,46 @@ class App(tk.Tk):
         self.run_label = ttk.Label(srow, text="gestoppt", style="Muted.TLabel")
         self.run_label.pack(side="left", padx=8)
 
-        self.log = ScrolledText(self.body, height=10, bg="#0B0B10", fg="#C8C8D8", relief="flat",
+        # --- Rückmeldung: Statuszeile + Einträge / Kanäle / Protokoll
+        self.status_var = tk.StringVar(value="Bot gestoppt.")
+        ttk.Label(self.body, textvariable=self.status_var, style="Status.TLabel").pack(fill="x", pady=(6, 4))
+        tabs = ttk.Notebook(self.body)
+        tabs.pack(fill="both", expand=True, pady=(0, 12))
+        self.tabs = tabs
+
+        ef = ttk.Frame(tabs, style="Card.TFrame")
+        self.entries = ttk.Treeview(ef, columns=("zeit", "kanal", "befehl", "status"), show="headings", height=8)
+        for col, text, width in (("zeit", "Zeit", 70), ("kanal", "Kanal", 130), ("befehl", "Befehl", 110),
+                                 ("status", "Status", 420)):
+            self.entries.heading(col, text=text, anchor="w")
+            self.entries.column(col, width=width, anchor="w", stretch=col == "status")
+        for tag, color in (("erkannt", "#C8C8D8"), ("gesendet", "#93C5FD"), ("angenommen", OK), ("bestaetigt", OK),
+                           ("testmodus", "#F59E0B"), ("abgelehnt", BAD), ("fehler", BAD), ("uebersprungen", MUTED),
+                           ("gewinn", "#FACC15"), ("whisper", "#F472B6")):
+            self.entries.tag_configure(tag, foreground=color)
+        self.entries.pack(fill="both", expand=True)
+        self.entries_empty = ttk.Label(ef, text="Noch keine Giveaways erkannt – der Bot liest mit und meldet sich hier.",
+                                       style="Muted.TLabel")
+        self.entries_empty.place(relx=0.5, rely=0.55, anchor="center")
+        tabs.add(ef, text="  Einträge  ")
+
+        cf = ttk.Frame(tabs, style="Card.TFrame")
+        self.chan_table = ttk.Treeview(cf, columns=("kanal", "status", "nachrichten", "eintrag"), show="headings", height=8)
+        for col, text, width in (("kanal", "Kanal", 150), ("status", "Status", 140), ("nachrichten", "Chat gelesen", 110),
+                                 ("eintrag", "Letzter Eintrag", 330)):
+            self.chan_table.heading(col, text=text, anchor="w")
+            self.chan_table.column(col, width=width, anchor="w", stretch=col == "eintrag")
+        self.chan_table.pack(fill="both", expand=True)
+        tabs.add(cf, text="  Kanäle  ")
+
+        lf = ttk.Frame(tabs, style="Card.TFrame")
+        self.log = ScrolledText(lf, height=8, bg="#0B0B10", fg="#C8C8D8", relief="flat",
                                 font=("Consolas", 9), state="disabled")
-        self.log.pack(fill="both", expand=True, pady=(6, 12))
+        self.log.pack(fill="both", expand=True)
         self.log.tag_config("warn", foreground="#F59E0B")
         self.log.tag_config("err", foreground=BAD)
+        tabs.add(lf, text="  Protokoll  ")
+        self._reset_stats()
 
     # ------------------------------------------------------------ Hilfen
     def client_id(self) -> str:
@@ -235,9 +282,121 @@ class App(tk.Tk):
                     self.write(ev[1], ev[2])
                 elif ev[0] == "call":
                     ev[1]()
+                elif ev[0] == "bot":
+                    self._on_bot_event(ev[1], ev[2])
         except queue.Empty:
             pass
         self.after(120, self._poll)
+
+    # ------------------------------------------------------------ Rückmeldungen vom Bot
+    def _reset_stats(self) -> None:
+        self.stat = {"chat": "–", "whispers": "–", "joined": set(), "messages": 0, "entries": 0, "accepted": 0}
+        self.chan_rows: dict = {}
+        self.entry_rows: dict = {}
+        self.msg_counts: dict = {}
+        for table in (self.entries, self.chan_table):
+            table.delete(*table.get_children())
+        self.entries_empty.place(relx=0.5, rely=0.55, anchor="center")
+        for c in self.settings["channels"] or []:
+            self._chan(c, status="wartet …")
+
+    def _chan(self, channel: str, **values) -> None:
+        if channel not in self.chan_rows:
+            self.chan_rows[channel] = self.chan_table.insert("", "end", values=(f"#{channel}", "", "0", "–"))
+        row = self.chan_rows[channel]
+        current = list(self.chan_table.item(row, "values"))
+        for key, idx in (("status", 1), ("messages", 2), ("entry", 3)):
+            if key in values:
+                current[idx] = values[key]
+        self.chan_table.item(row, values=current)
+
+    def _entry_row(self, key, channel: str, command: str, status_text: str, tag: str) -> None:
+        self.entries_empty.place_forget()
+        now = time.strftime("%H:%M:%S")
+        if key in self.entry_rows:
+            row = self.entry_rows[key]
+            vals = list(self.entries.item(row, "values"))
+            vals[3] = status_text
+            if command:
+                vals[2] = command
+            self.entries.item(row, values=vals, tags=(tag,))
+        else:
+            shown = channel if channel.startswith("✉") else f"#{channel}"
+            self.entry_rows[key] = self.entries.insert("", 0, values=(now, shown, command, status_text), tags=(tag,))
+
+    def _update_status(self) -> None:
+        st = self.stat
+        if not self.bot_thread:
+            self.status_var.set("Bot gestoppt.")
+            return
+        total = len(self.settings["channels"] or [])
+        self.status_var.set(
+            f"Chat: {st['chat']}     Flüstern: {st['whispers']}     Kanäle betreten: {len(st['joined'])}/{total}\n"
+            + f"{st['messages']:,} Chatnachrichten gelesen     Giveaways erkannt: {st['entries']}     "
+              f"davon eingetragen: {st['accepted']}".replace(",", ".")
+        )
+
+    def _on_bot_event(self, kind: str, d: dict) -> None:
+        st = self.stat
+        if kind == "chat":
+            st["chat"] = {"verbunden": "verbunden ✔", "getrennt": "getrennt – verbinde neu …"}.get(d["state"], d["state"])
+            if d["state"] == "getrennt":
+                st["joined"].clear()
+        elif kind == "whispers":
+            st["whispers"] = "aktiv ✔" if d["state"] == "aktiv" else d["state"]
+        elif kind == "joined":
+            st["joined"].add(d["channel"])
+            self._chan(d["channel"], status="betreten ✔")
+        elif kind == "message":
+            st["messages"] += 1
+            c = d["channel"]
+            self.msg_counts[c] = self.msg_counts.get(c, 0) + 1
+            self._chan(c, messages=f"{self.msg_counts[c]:,}".replace(",", "."))
+        elif kind == "entry":
+            key, status = d["id"], d["status"]
+            labels = {
+                "erkannt": ("🎁 Giveaway erkannt – " + d.get("detail", ""), "erkannt"),
+                "testmodus": ("🧪 Testmodus – nicht gesendet (Haken bei Testmodus entfernen, um mitzumachen)", "testmodus"),
+                "gesendet": ("📨 " + d.get("detail", "gesendet"), "gesendet"),
+                "angenommen": ("✅ Eingetragen – von Twitch angenommen", "angenommen"),
+                "abgelehnt": ("❌ Abgelehnt: " + d.get("detail", ""), "abgelehnt"),
+                "fehler": ("⚠ " + d.get("detail", "Fehler"), "fehler"),
+            }
+            text, tag = labels.get(status, (status, "erkannt"))
+            self._entry_row(key, d["channel"], d.get("command", ""), text, tag)
+            if status == "erkannt":
+                st["entries"] += 1
+            if status == "angenommen":
+                st["accepted"] += 1
+            self._chan(d["channel"], entry=f"{time.strftime('%H:%M')}  {text}")
+            if status in ("angenommen", "abgelehnt"):
+                self.tabs.select(0)
+        elif kind == "confirmed":
+            key = next((k for k in reversed(list(self.entry_rows)) if isinstance(k, int)
+                        and self.entries.item(self.entry_rows[k], "values")[1] == f"#{d['channel']}"), None)
+            text = f"✅ Vom Giveaway-Bot bestätigt ({d['sender']})"
+            self._entry_row(key if key is not None else ("c", d["channel"], time.time()), d["channel"], "", text, "bestaetigt")
+            self._chan(d["channel"], entry=f"{time.strftime('%H:%M')}  {text}")
+        elif kind == "skipped":
+            self._entry_row(("s", d["channel"], time.time()), d["channel"], d["command"],
+                            "⏸ Erkannt, aber schon eingetragen (Pause bis zum nächsten Eintrag)", "uebersprungen")
+        elif kind == "win":
+            self._entry_row(("w", time.time()), d["channel"], "", f"🎉 GEWINN? {d['sender']}: {d['text']}", "gewinn")
+            self._alert(f"🎉 Möglicher Gewinn in #{d['channel']}!\n\n{d['sender']}: {d['text']}")
+        elif kind == "whisper":
+            self._entry_row(("f", time.time()), "✉ Flüstern", "", f"✉ {d['sender']}: {d['text']}", "whisper")
+            self._alert(f"✉ Flüsternachricht von {d['sender']}:\n\n{d['text']}")
+        self._update_status()
+
+    def _alert(self, text: str) -> None:
+        """Fenster nach vorne holen + Hinweis – auch wenn das Handy gerade nicht in der Nähe ist."""
+        self.tabs.select(0)
+        self.deiconify()
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(1500, lambda: self.attributes("-topmost", False))
+        self.bell()
+        messagebox.showinfo(APP_NAME, text)
 
     def _later(self, fn) -> None:
         self.events.put(("call", fn))
@@ -369,6 +528,9 @@ class App(tk.Tk):
         cfg["refresh_token"] = self.settings["refresh_token"] or ""
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
+        self._reset_stats()
+        self.ch_card.pack_forget()  # Platz für die Rückmeldungen – Einstellungen kommen beim Stoppen zurück
+        self.ph_card.pack_forget()
         self.run_label.configure(text="läuft" + (" (Testmodus)" if cfg["dry_run"] else " – SCHARF"), foreground=OK)
 
         def runner():
@@ -377,7 +539,9 @@ class App(tk.Tk):
             asyncio.set_event_loop(loop)
             code = 0
             try:
-                self.bot_task = loop.create_task(bot.run_bot(cfg, on_token_update=self._token_updated))
+                self.bot_task = loop.create_task(bot.run_bot(
+                    cfg, on_token_update=self._token_updated,
+                    on_event=lambda kind, **d: self.events.put(("bot", kind, d))))
                 code = loop.run_until_complete(self.bot_task)
             except asyncio.CancelledError:
                 bot.log.info("Bot gestoppt.")
@@ -399,6 +563,9 @@ class App(tk.Tk):
 
     def _stopped(self, code: int) -> None:
         self.bot_thread = None
+        self.ch_card.pack(fill="x", pady=6, after=self.acc_card)
+        self.ph_card.pack(fill="x", pady=6, after=self.ch_card)
+        self._update_status()
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.run_label.configure(text="gestoppt", foreground=MUTED)
