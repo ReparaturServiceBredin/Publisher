@@ -76,6 +76,18 @@ def download_update(update: Update, progress: Callable[[float], None] | None = N
     return target
 
 
+def clean_restart_env() -> dict:
+    """Umgebung für den Neustart einer PyInstaller-exe.
+
+    Die alte exe vererbt sonst interne Variablen (u. a. ihren temporären Entpack-Ordner) an die neue –
+    die neue findet den Ordner nicht mehr und beendet sich sofort ohne Meldung. PyInstaller ≥ 6.9 erkennt
+    PYINSTALLER_RESET_ENVIRONMENT=1 und startet dann wie per Doppelklick."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("_PYI") or k.startswith("_MEI") or k in ("TCL_LIBRARY", "TK_LIBRARY"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
 def apply_update_and_restart(new_exe: Path) -> None:
     """Startet ein kleines Skript, das nach dem Beenden die .exe ersetzt und neu startet."""
     exe = Path(sys.executable)
@@ -98,4 +110,4 @@ def apply_update_and_restart(new_exe: Path) -> None:
         encoding="mbcs" if os.name == "nt" else "utf-8",
     )
     flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP (kein Fenster)
-    subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True)
+    subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True, env=clean_restart_env())

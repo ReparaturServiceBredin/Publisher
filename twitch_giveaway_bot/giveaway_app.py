@@ -123,6 +123,18 @@ def download_update(progress=None) -> Path:
     return target
 
 
+def clean_restart_env() -> dict:
+    """Umgebung für den Neustart einer PyInstaller-exe.
+
+    Die alte exe vererbt sonst interne Variablen (u. a. ihren temporären Entpack-Ordner) an die neue –
+    die neue findet den Ordner nicht mehr und beendet sich sofort ohne Meldung. PyInstaller ≥ 6.9 erkennt
+    PYINSTALLER_RESET_ENVIRONMENT=1 und startet dann wie per Doppelklick."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("_PYI") or k.startswith("_MEI") or k in ("TCL_LIBRARY", "TK_LIBRARY"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
 def apply_update_and_restart(new_exe: Path, resume: bool) -> None:
     """Kleines Skript ersetzt die .exe, sobald sie beendet ist, und startet sie neu."""
     import subprocess
@@ -141,7 +153,8 @@ def apply_update_and_restart(new_exe: Path, resume: bool) -> None:
         f':start\r\nstart "" "{exe}"{args}\r\ndel "%~f0"\r\n',
         encoding="mbcs",
     )
-    subprocess.Popen(["cmd", "/c", str(script)], creationflags=0x00000008 | 0x00000200, close_fds=True)
+    subprocess.Popen(["cmd", "/c", str(script)], creationflags=0x00000008 | 0x00000200, close_fds=True,
+                     env=clean_restart_env())
 
 
 class QueueLogHandler(logging.Handler):
@@ -178,8 +191,10 @@ class App(tk.Tk):
         self.after(100, self._poll)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bad_channels: list = []
-        resume = RESUME_FLAG in sys.argv and self.settings["resume_after_update"]
-        if resume:
+        pending = self.settings["resume_after_update"]
+        resume = bool(pending) and (RESUME_FLAG in sys.argv or (isinstance(pending, (int, float)) and pending is not True
+                                                               and time.time() - pending < 600))
+        if pending:
             self.settings["resume_after_update"] = False
             self.settings.save()
             self.after(300, lambda: self.write(f"Update auf Version {VERSION} installiert ✔"))
@@ -437,7 +452,7 @@ class App(tk.Tk):
             return
         self._save_form()
         resume = bool(self.bot_thread)
-        self.settings["resume_after_update"] = resume
+        self.settings["resume_after_update"] = time.time() if resume else False
         self.settings.save()
         self.update_btn.configure(state="disabled", text="Lade 0 %")
         self.write(f"Lade Update {latest} …")
