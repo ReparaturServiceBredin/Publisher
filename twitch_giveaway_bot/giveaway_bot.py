@@ -465,6 +465,29 @@ CHANNEL_NAME_RE = re.compile(r"^[a-z0-9_]{3,25}$")
 CHANNEL_URL_RE = re.compile(r"twitch\.tv/(?:popout/)?([A-Za-z0-9_]{3,25})", re.IGNORECASE)
 
 
+def normalize_chat(text: str) -> str:
+    """Chat-Nachricht vereinheitlichen, bevor gezählt wird.
+
+    * Chatterino/7TV hängen ein unsichtbares Zeichen (U+E0000) an, damit Twitch wiederholte Nachrichten
+      nicht blockt – „100“ und „100“+Unsichtbar sind für uns dasselbe.
+    * Weitere unsichtbare Zeichen (Zero-Width, BOM, Variation Selectors) entfernen.
+    * „100 100 100“ oder „PS5 ps5“ → „100“ bzw. „PS5“ (Leute wiederholen das Wort, um den Filter zu umgehen).
+    """
+    import unicodedata
+
+    cleaned = "".join(
+        ch for ch in text
+        if not (0xE0000 <= ord(ch) <= 0xE007F or 0xFE00 <= ord(ch) <= 0xFE0F
+                or unicodedata.category(ch) == "Cf")
+    )
+    tokens = cleaned.split()
+    if not tokens:
+        return ""
+    if len(tokens) > 1 and len({t.lower() for t in tokens}) == 1:
+        return tokens[0]
+    return " ".join(tokens)
+
+
 def clean_channel(raw: str) -> Optional[str]:
     """„https://www.twitch.tv/MontanaBlack88“, „@name“, „#name“ → „montanablack88“. Ungültig → None."""
     text = str(raw).strip()
@@ -657,7 +680,7 @@ class Detector:
             if cmd:
                 found = (cmd, f"Ansage von {who}")
         # 2) Burst: viele verschiedene Nutzer schreiben denselben einzelnen Befehl
-        stripped = text.strip()
+        stripped = normalize_chat(text)
         if SINGLE_COMMAND_RE.match(stripped):
             cmd = stripped.lower()
             if cmd not in self.cfg["blocked_commands"]:
