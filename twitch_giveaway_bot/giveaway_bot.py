@@ -579,6 +579,7 @@ class Detector:
         self.last_entry: Dict[str, float] = {}
         self.hint: Dict[str, float] = {}
         self.first_seen: Dict[str, float] = {}
+        self.chan_msgs: Dict[str, Deque[float]] = {}  # Zeitpunkte aller Nachrichten der letzten 30 s (für Anteile)
         self.word_fired: Dict[Tuple[str, str], float] = {}
         self._last_sweep = 0.0  # Kanal → Zeitpunkt der letzten Giveaway-Ansage von Bot/Mod/Streamer
         self.on_skip = lambda channel, command, reason: None
@@ -617,6 +618,16 @@ class Detector:
         need = self.cfg["word_burst_min_users"]
         if len(recent) < need:
             return None
+        # Läuft das Giveaway schon länger (oder der Bot kam mitten rein), ist das Wort nicht mehr „neu“ –
+        # dann zählt, ob es den Chat klar beherrscht: Zahlen ab 25 %, andere Wörter ab 50 % aller Nachrichten.
+        msgs = self.chan_msgs.get(channel)
+        if msgs and now - self.first_seen[channel] >= 20:
+            total = sum(1 for t in msgs if now - t <= window)
+            word_msgs = sum(1 for t, _ in q if now - t <= window)
+            share = word_msgs / max(total, 1)
+            if share >= (0.25 if word.isdigit() else 0.5):
+                self.word_fired[key] = now
+                return word, f"{len(recent)} Nutzer schreiben „{word}“ ({share:.0%} des Chats)"
         observed = min(NOVELTY_WINDOW_SEC, now - window - self.first_seen[channel])
         if observed < WARMUP_SEC:
             return None  # noch keine Vergleichsbasis (gerade erst verbunden)
@@ -670,6 +681,10 @@ class Detector:
             return None
         lower = text.lower()
         self.first_seen.setdefault(channel, now)
+        cm = self.chan_msgs.setdefault(channel, deque())
+        cm.append(now)
+        while cm and now - cm[0] > self.cfg["burst_window_sec"]:
+            cm.popleft()
         found: Optional[Tuple[str, str]] = None
         # 1) Giveaway-Bot, Streamer oder Mod kündigt an
         if (sender in self.cfg["giveaway_bots"] or privileged) and any(w in lower for w in GIVEAWAY_WORDS):
