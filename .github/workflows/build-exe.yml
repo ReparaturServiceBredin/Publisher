@@ -71,6 +71,21 @@ jobs:
           Get-Content selftest.txt
           if ($p.ExitCode -ne 0) { exit 1 }
 
+      - name: Update-Neustart echt testen (Tausch + Neustart auf Windows)
+        shell: pwsh
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP "upd"
+          New-Item -ItemType Directory -Force $d | Out-Null
+          Copy-Item dist\Publisher.exe (Join-Path $d "Publisher.exe")
+          $res = Join-Path $d "result.txt"
+          $p = Start-Process -FilePath (Join-Path $d "Publisher.exe") -ArgumentList '--update-selftest', $res -PassThru
+          $p.WaitForExit()
+          for ($i = 0; $i -lt 60 -and -not (Test-Path $res); $i++) { Start-Sleep -Seconds 1 }
+          Get-ChildItem $d | Format-Table Name, Length
+          if (Test-Path (Join-Path $d "result.how")) { "Neustart-Weg: " + (Get-Content (Join-Path $d "result.how")) }
+          if (-not (Test-Path $res)) { Write-Error "Die neue exe wurde nach dem Update NICHT gestartet"; exit 1 }
+          Get-Content $res
+
       - uses: actions/upload-artifact@v4
         with:
           name: Publisher-${{ env.VERSION }}

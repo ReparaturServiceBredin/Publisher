@@ -84,6 +84,15 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         sys.exit(selftest(sys.argv[2]))
+    from pathlib import Path
+
+    from publisher import updater
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "--update-selftest":
+        sys.exit(updater.update_selftest(Path(sys.argv[2])))
+    if updater.answer_update_selftest():
+        sys.exit(0)
+    updater.cleanup_old_exes()
     from publisher.gui import main
 
     main()

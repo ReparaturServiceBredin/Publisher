@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,26 +89,79 @@ def clean_restart_env() -> dict:
     return env
 
 
-def apply_update_and_restart(new_exe: Path) -> None:
-    """Startet ein kleines Skript, das nach dem Beenden die .exe ersetzt und neu startet."""
+UPDATE_SELFTEST_FILE = "_update_selftest.json"
+
+
+def swap_in_new_exe(new_exe: Path) -> Path:
+    """Neue Version sofort an die Stelle der laufenden legen (Windows erlaubt das Umbenennen einer laufenden
+    .exe). Damit ist das Update installiert, selbst wenn der Neustart scheitert. Aufräumen: cleanup_old_exes()."""
     exe = Path(sys.executable)
-    pid = os.getpid()
-    script = Path(tempfile.gettempdir()) / f"publisher_update_{pid}.cmd"
-    script.write_text(
-        "@echo off\r\n"
-        ":wait\r\n"
-        f'tasklist /FI "PID eq {pid}" 2>nul | "%SystemRoot%\\System32\\find.exe" "{pid}" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)\r\n'
-        "set n=0\r\n"
-        ":move\r\n"
-        f'move /y "{new_exe}" "{exe}" >nul 2>&1 && goto start\r\n'
-        "set /a n+=1\r\n"
-        "if %n% GEQ 30 goto start\r\n"
-        "ping -n 2 127.0.0.1 >nul\r\n"
-        "goto move\r\n"
-        ":start\r\n"
-        f'start "" "{exe}"\r\n'
-        'del "%~f0"\r\n',
-        encoding="mbcs" if os.name == "nt" else "utf-8",
-    )
-    flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP (kein Fenster)
-    subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True, env=clean_restart_env())
+    old = exe.with_name(exe.stem + ".old.exe")
+    try:
+        old.unlink(missing_ok=True)
+    except OSError:
+        old = exe.with_name(f"{exe.stem}.old{int(time.time())}.exe")
+    os.replace(exe, old)
+    try:
+        os.replace(new_exe, exe)
+    except OSError:
+        os.replace(old, exe)
+        raise
+    return exe
+
+
+def restart_exe(exe: Path) -> str:
+    """Neue Instanz starten, die das Beenden der alten überlebt (PyInstaller-exe laufen in einem Windows-Job,
+    der beim Beenden alle gestarteten Prozesse mitnimmt → CREATE_BREAKAWAY_FROM_JOB, sonst über den Explorer)."""
+    env = clean_restart_env()
+    DETACHED, NEW_GROUP, BREAKAWAY = 0x00000008, 0x00000200, 0x01000000
+    try:
+        subprocess.Popen([str(exe)], creationflags=DETACHED | NEW_GROUP | BREAKAWAY, env=env, close_fds=True,
+                         cwd=str(exe.parent))
+        return "direkt"
+    except OSError:
+        subprocess.Popen(["explorer.exe", str(exe)], env=env, close_fds=True)
+        return "explorer"
+
+
+def apply_update_and_restart(new_exe: Path) -> None:
+    """Neue Version eintauschen und neu starten (ohne Hilfsskript, das Windows mitbeenden könnte)."""
+    restart_exe(swap_in_new_exe(new_exe))
+
+
+def cleanup_old_exes() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    exe = Path(sys.executable)
+    for old in exe.parent.glob(exe.stem + ".old*.exe"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def update_selftest(result: Path) -> int:
+    """Build-Test auf GitHub: Update mit einer Kopie von sich selbst echt durchspielen."""
+    import shutil
+
+    exe = Path(sys.executable)
+    new = exe.with_name(exe.stem + ".new.exe")
+    shutil.copy2(exe, new)
+    (exe.parent / UPDATE_SELFTEST_FILE).write_text(json.dumps({"result": str(result)}), encoding="utf-8")
+    swap_in_new_exe(new)
+    result.with_suffix(".how").write_text(restart_exe(exe), encoding="utf-8")
+    return 0
+
+
+def answer_update_selftest() -> bool:
+    job = Path(sys.executable).parent / UPDATE_SELFTEST_FILE
+    if not getattr(sys, "frozen", False) or not job.exists():
+        return False
+    try:
+        result = Path(json.loads(job.read_text(encoding="utf-8"))["result"])
+        old_left = [p.name for p in Path(sys.executable).parent.glob("*.old*.exe")]
+        result.write_text(f"OK version={__version__} old_files={old_left}", encoding="utf-8")
+    finally:
+        job.unlink(missing_ok=True)
+    return True
+

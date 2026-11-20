@@ -135,26 +135,90 @@ def clean_restart_env() -> dict:
     return env
 
 
-def apply_update_and_restart(new_exe: Path, resume: bool) -> None:
-    """Kleines Skript ersetzt die .exe, sobald sie beendet ist, und startet sie neu."""
-    import subprocess
-    import tempfile
+UPDATE_SELFTEST_FILE = "_update_selftest.json"
 
-    exe, pid = Path(sys.executable), os.getpid()
-    args = f" {RESUME_FLAG}" if resume else ""
-    script = Path(tempfile.gettempdir()) / f"giveawaybot_update_{pid}.cmd"
-    script.write_text(
-        "@echo off\r\n:wait\r\n"
-        f'tasklist /FI "PID eq {pid}" 2>nul | "%SystemRoot%\\System32\\find.exe" "{pid}" >nul && '
-        "(ping -n 2 127.0.0.1 >nul & goto wait)\r\n"
-        "set n=0\r\n:move\r\n"
-        f'move /y "{new_exe}" "{exe}" >nul 2>&1 && goto start\r\n'
-        "set /a n+=1\r\nif %n% GEQ 30 goto start\r\nping -n 2 127.0.0.1 >nul\r\ngoto move\r\n"
-        f':start\r\nstart "" "{exe}"{args}\r\ndel "%~f0"\r\n',
-        encoding="mbcs",
-    )
-    subprocess.Popen(["cmd", "/c", str(script)], creationflags=0x00000008 | 0x00000200, close_fds=True,
-                     env=clean_restart_env())
+
+def swap_in_new_exe(new_exe: Path) -> Path:
+    """Neue Version sofort an die Stelle der laufenden legen.
+
+    Windows erlaubt, eine laufende .exe umzubenennen (nur nicht zu löschen/überschreiben). Die alte wird
+    zu „….old.exe“, die neue bekommt den richtigen Namen – das Update ist damit installiert, auch wenn der
+    Neustart danach nicht klappen sollte. Aufgeräumt wird beim nächsten Start (cleanup_old_exes)."""
+    exe = Path(sys.executable)
+    old = exe.with_name(exe.stem + ".old.exe")
+    try:
+        old.unlink(missing_ok=True)
+    except OSError:  # alte Kopie noch in Benutzung → anderen Namen nehmen
+        old = exe.with_name(f"{exe.stem}.old{int(time.time())}.exe")
+    os.replace(exe, old)
+    try:
+        os.replace(new_exe, exe)
+    except OSError:
+        os.replace(old, exe)  # zurückrollen, damit nichts kaputt ist
+        raise
+    return exe
+
+
+def restart_exe(exe: Path) -> str:
+    """Neue Instanz starten, die das Beenden der alten überlebt. Gibt den genutzten Weg zurück.
+
+    PyInstaller-exe-Dateien laufen in einem Windows-„Job“: Endet die alte exe, beendet Windows alle
+    Prozesse, die sie gestartet hat. Deshalb mit CREATE_BREAKAWAY_FROM_JOB starten; ist das nicht erlaubt,
+    über den Explorer (der läuft außerhalb des Jobs)."""
+    import subprocess
+
+    env = clean_restart_env()
+    DETACHED, NEW_GROUP, BREAKAWAY = 0x00000008, 0x00000200, 0x01000000
+    try:
+        subprocess.Popen([str(exe)], creationflags=DETACHED | NEW_GROUP | BREAKAWAY, env=env, close_fds=True,
+                         cwd=str(exe.parent))
+        return "direkt"
+    except OSError:
+        subprocess.Popen(["explorer.exe", str(exe)], env=env, close_fds=True)
+        return "explorer"
+
+
+def cleanup_old_exes() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    exe = Path(sys.executable)
+    for old in exe.parent.glob(exe.stem + ".old*.exe"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def update_selftest() -> int:
+    """Nur für den Build auf GitHub: ein Update echt durchspielen (Tausch + Neustart) und prüfen.
+
+    Die laufende exe nimmt eine Kopie von sich selbst als „neue Version“, tauscht sie ein und startet sie.
+    Die neue Instanz findet die Auftragsdatei, schreibt „OK“ in die Ergebnisdatei und beendet sich."""
+    exe = Path(sys.executable)
+    result = Path(sys.argv[sys.argv.index("--update-selftest") + 1])
+    new = exe.with_name(exe.stem + ".new.exe")
+    import shutil
+
+    shutil.copy2(exe, new)
+    (exe.parent / UPDATE_SELFTEST_FILE).write_text(json.dumps({"result": str(result)}), encoding="utf-8")
+    swap_in_new_exe(new)
+    how = restart_exe(exe)
+    result.with_suffix(".how").write_text(how, encoding="utf-8")
+    return 0
+
+
+def answer_update_selftest() -> bool:
+    """Neue Instanz nach dem Test-Update: Ergebnis schreiben und ohne Fenster beenden."""
+    job = Path(sys.executable).parent / UPDATE_SELFTEST_FILE
+    if not getattr(sys, "frozen", False) or not job.exists():
+        return False
+    try:
+        result = Path(json.loads(job.read_text(encoding="utf-8"))["result"])
+        old_left = [p.name for p in Path(sys.executable).parent.glob("*.old*.exe")]
+        result.write_text(f"OK version={VERSION} old_files={old_left}", encoding="utf-8")
+    finally:
+        job.unlink(missing_ok=True)
+    return True
 
 
 class QueueLogHandler(logging.Handler):
@@ -472,8 +536,18 @@ class App(tk.Tk):
     def _install(self, path: Path, resume: bool) -> None:
         self.write("Installiere Update – der Bot startet gleich neu …")
         self.stop()
-        apply_update_and_restart(path, resume)
-        self.after(1200, self.destroy)
+        try:
+            exe = swap_in_new_exe(path)
+        except OSError as exc:
+            self._reset_update_btn()
+            messagebox.showerror(APP_NAME, f"Update konnte nicht installiert werden:\n{exc}\n\n"
+                                           "Liegt die exe in einem geschützten Ordner? Am besten nach C:\\GiveawayBot legen.")
+            return
+        try:
+            restart_exe(exe)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showinfo(APP_NAME, f"Update installiert ✔ – bitte die exe einmal selbst neu starten.\n({exc})")
+        self.after(800, self.destroy)
 
     # ------------------------------------------------------------ Rückmeldungen vom Bot
     def _reset_stats(self) -> None:
@@ -786,6 +860,11 @@ class App(tk.Tk):
 def main() -> None:
     if "--selftest" in sys.argv:
         sys.exit(bot.selftest())
+    if "--update-selftest" in sys.argv:
+        sys.exit(update_selftest())
+    if answer_update_selftest():
+        sys.exit(0)
+    cleanup_old_exes()
     App().mainloop()
 
 
