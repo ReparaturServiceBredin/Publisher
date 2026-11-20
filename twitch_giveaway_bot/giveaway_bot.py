@@ -75,6 +75,18 @@ NOTICE_REASONS = {
 
 GIVEAWAY_WORDS = ("giveaway", "raffle", "gewinnspiel", "verlosung", "ticket")
 WIN_WORDS = ("won", "winner", "gewonnen", "gewinner", "gratul", "glückwunsch", "congrat")
+# Gewinner-Ansage (Bot/Mod/Streamer): „@name hat gewonnen“, „The winner is name“, „Gewinner: name“
+DRAW_WORDS = WIN_WORDS + ("gezogen", "ausgelost", "drawn", "picked", "gewinnt", "wins")
+MENTION_RE = re.compile(r"@([A-Za-z0-9_]{3,25})")
+WINNER_NAME_RE = re.compile(
+    r"(?:winner(?:\s+is)?|gewinner(?:in)?(?:\s+ist)?|gewonnen hat|gezogen wurde|ausgelost wurde)\s*[:\-]?\s*@?([A-Za-z0-9_]{3,25})"
+    r"|@?([A-Za-z0-9_]{3,25})\s+(?:hat|has)\s+(?:gewonnen|won)"
+    r"|@?([A-Za-z0-9_]{3,25})\s+(?:won|wins|gewinnt)\b",
+    re.IGNORECASE,
+)
+NAME_STOPWORDS = {"the", "der", "die", "das", "ist", "is", "you", "du", "ihr", "wer", "who", "jemand", "someone",
+                  "und", "and", "giveaway", "raffle", "gewinnspiel", "verlosung", "chat", "everyone", "alle"}
+CONGRATS_WORDS = ("gg", "congrat", "glückwunsch", "gratul", "gw", "gönn", "glueckwunsch")
 
 DEFAULTS = {
     "username": "",
@@ -579,6 +591,7 @@ class Detector:
         self.last_entry: Dict[str, float] = {}
         self.hint: Dict[str, float] = {}
         self.first_seen: Dict[str, float] = {}
+        self.winners_seen: Dict[tuple, float] = {}
         self.chan_msgs: Dict[str, Deque[float]] = {}  # Zeitpunkte aller Nachrichten der letzten 30 s (für Anteile)
         self.word_fired: Dict[Tuple[str, str], float] = {}
         self._last_sweep = 0.0  # Kanal → Zeitpunkt der letzten Giveaway-Ansage von Bot/Mod/Streamer
@@ -735,6 +748,45 @@ class Detector:
             return False
         lower = text.lower()
         return any(w in lower for w in ENTRY_CONFIRM_WORDS) and not any(w in lower for w in WIN_WORDS)
+
+    def winner_announcement(self, channel: str, sender: str, text: str, privileged: bool,
+                            now: Optional[float] = None) -> Optional[dict]:
+        """Wurde gerade ein Gewinner gezogen? Quelle 1: Giveaway-Bot/Mod/Streamer nennt ihn im Chat.
+        Quelle 2: Monte sagt es nur im Stream – dann gratulieren viele Zuschauer derselben Person („GG @name“)."""
+        now = time.monotonic() if now is None else now
+        lower = text.lower()
+        official = sender in self.cfg["giveaway_bots"] or privileged
+        if official and any(w in lower for w in DRAW_WORDS):
+            names = []
+            for m in WINNER_NAME_RE.finditer(text):
+                name = next(g for g in m.groups() if g).lower()
+                if name not in NAME_STOPWORDS and name not in names:
+                    names.append(name)
+            names += [n.lower() for n in MENTION_RE.findall(text) if n.lower() not in names]
+            names = [n for n in names if n != sender and n != channel]
+            if names:
+                who = sender if sender in self.cfg["giveaway_bots"] else f"{sender} (Mod/Streamer)"
+                return self._new_winner(channel, names, f"laut {who}", text, now)
+        # Gratulationswelle im Chat: mindestens 5 verschiedene Leute gratulieren derselben Person in 60 s
+        if not official and any(w in lower for w in CONGRATS_WORDS):
+            for name in {n.lower() for n in MENTION_RE.findall(text)}:
+                if name == sender:
+                    continue
+                q = self.burst[(channel, "congrats:" + name)]
+                q.append((now, sender))
+                while q and now - q[0][0] > 60:
+                    q.popleft()
+                if len({u for _, u in q}) >= 5:
+                    q.clear()
+                    return self._new_winner(channel, [name], "laut Chat, vermutlich im Stream angesagt", text, now)
+        return None
+
+    def _new_winner(self, channel: str, names: list, source: str, text: str, now: float) -> Optional[dict]:
+        key = (channel, tuple(names))
+        if now - self.winners_seen.get(key, -1e9) < 120:
+            return None  # dieselbe Ansage nicht doppelt melden
+        self.winners_seen[key] = now
+        return {"winners": names, "source": source, "text": text, "me": self.me in names}
 
     def is_win(self, sender: str, text: str) -> bool:
         if sender == self.me:
@@ -923,6 +975,12 @@ class ChatBot:
         if self.detector.is_entry_confirmation(sender, text):
             log.info("✔ %s bestätigt deinen Eintrag in #%s: %s", display, channel, text)
             self.emit("confirmed", channel=channel, sender=display, text=text)
+        drawn = self.detector.winner_announcement(channel, sender, text, privileged)
+        if drawn:
+            names = ", ".join(drawn["winners"])
+            log.info("🏆 Gewinner gezogen in #%s: %s (%s)", channel, names, drawn["source"])
+            self.emit("winner", channel=channel, winners=drawn["winners"], source=drawn["source"],
+                      text=text, me=drawn["me"])
         if self.detector.is_win(sender, text):
             self.emit("win", channel=channel, sender=display, text=text)
             log.warning("🎉 MÖGLICHER GEWINN in #%s von %s: %s", channel, display, text)

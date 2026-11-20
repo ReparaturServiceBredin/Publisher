@@ -417,7 +417,7 @@ class App(tk.Tk):
             self.entries.column(col, width=width, anchor="w", stretch=col == "status")
         for tag, color in (("erkannt", "#C8C8D8"), ("gesendet", "#93C5FD"), ("angenommen", OK), ("bestaetigt", OK),
                            ("testmodus", "#F59E0B"), ("abgelehnt", BAD), ("fehler", BAD), ("uebersprungen", MUTED),
-                           ("gewinn", "#FACC15"), ("whisper", "#F472B6")):
+                           ("gewinn", "#FACC15"), ("whisper", "#F472B6"), ("gezogen", "#FDE68A")):
             self.entries.tag_configure(tag, foreground=color)
         self.entries.pack(fill="both", expand=True)
         self.entries_empty = ttk.Label(ef, text="Noch keine Giveaways erkannt – der Bot liest mit und meldet sich hier.",
@@ -644,6 +644,14 @@ class App(tk.Tk):
         elif kind == "skipped":
             self._entry_row(("s", d["channel"], time.time()), d["channel"], d["command"],
                             "⏸ Erkannt, aber schon eingetragen (Pause bis zum nächsten Eintrag)", "uebersprungen")
+        elif kind == "winner":
+            names = ", ".join(d["winners"])
+            if d["me"]:
+                text = f"🎉 DU wurdest gezogen! – {d['source']}"
+            else:
+                text = f"🏆 Gewinner gezogen: {names} – {d['source']}"
+            self._entry_row(("g", d["channel"], names, time.time()), d["channel"], "", text, "gewinn" if d["me"] else "gezogen")
+            self._chan(d["channel"], entry=f"{time.strftime('%H:%M')}  {text}")
         elif kind == "win":
             self._entry_row(("w", time.time()), d["channel"], "", f"🎉 GEWINN? {d['sender']}: {d['text']}", "gewinn")
             self._alert(f"🎉 Möglicher Gewinn in #{d['channel']}!\n\n{d['sender']}: {d['text']}")
